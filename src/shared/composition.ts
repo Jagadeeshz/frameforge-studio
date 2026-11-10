@@ -46,11 +46,13 @@ export function buildCompositionHtml(spec: JobSpec, options: CompositionOptions)
   const s = scale(options.width)
   const headline = escapeHtml(options.kind === 'intro' ? spec.titles.headline || spec.title : 'Delivered')
   const subhead = escapeHtml(
-    options.kind === 'intro' ? spec.titles.subhead || spec.shots[0]?.prompt.slice(0, 90) || '' : `${spec.shots.length} shots · ${spec.durationSeconds}s each`
+    options.kind === 'intro'
+      ? spec.titles.subhead || spec.brief.slice(0, 90)
+      : `${spec.scenes} scenes · ${(spec.durationSeconds / Math.max(1, spec.scenes)).toFixed(1)}s each`
   )
   const accent = /^#[0-9a-fA-F]{6}$/.test(spec.titles.accent) ? spec.titles.accent : '#7C5CFF'
-  const shotCount = String(spec.shots.length).padStart(2, '0')
-  const metaLeft = options.kind === 'intro' ? `${shotCount} SHOTS` : 'LOCAL RENDER'
+  const shotCount = String(spec.scenes).padStart(2, '0')
+  const metaLeft = options.kind === 'intro' ? `${shotCount} SCENES` : 'LOCAL RENDER'
   const metaRight = ASPECT_LABEL[spec.aspect]
   const brand = 'FRAMEFORGE STUDIO'
   const mode = options.mode ?? 'capture'
