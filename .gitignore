@@ -3,6 +3,8 @@ out/
 release/
 .smoke/
 smoke.png
+docs/.guide.build.html
+docs/.guide.pass1.pdf
 *.log
 .DS_Store
 Thumbs.db

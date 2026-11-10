@@ -15,6 +15,8 @@
     "test:watch": "vitest",
     "smoke": "node scripts/smoke.mjs",
     "smoke:job": "node scripts/smoke-job.mjs",
+    "docs:pdf": "node scripts/md-to-pdf.mjs",
+    "docs:check": "node scripts/verify-pdf.mjs docs/FrameForge-Studio-Guide.pdf",
     "package": "pnpm build && electron-builder --dir",
     "dist": "pnpm build && electron-builder"
   },
@@ -37,6 +39,7 @@
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "pdfjs-dist": "^4.10.38",
     "tailwindcss": "^4.1.11",
     "typescript": "^5.7.3",
     "vite": "^5.4.14",

@@ -77,6 +77,21 @@ src/
 - **No shell.** Every child process is spawned with an argument array.
 - **Input validation.** All IPC payloads are re-parsed with zod in main.
 
+## Documentation
+
+`docs/GUIDE.md` is the source of truth for the user manual, and
+`docs/FrameForge-Studio-Guide.pdf` is the rendered 13-page document with a cover,
+a table of contents carrying real page numbers, and running footers.
+
+```bash
+pnpm docs:pdf      # Markdown -> print-styled HTML -> Chromium printToPDF (two passes)
+pnpm docs:check    # pdf.js verification: sections present and in order, page count, encoding
+```
+
+The PDF is produced in two passes: the first lays the document out so each section's
+page number can be read back with pdf.js, the second prints the same layout with a
+populated table of contents. Only the Markdown is edited by hand.
+
 ## Requirements
 
 - Node 22+ and pnpm 10+
@@ -103,6 +118,8 @@ pnpm test           # 41 tests: vault, providers, ffmpeg, pipeline, office, comp
 pnpm build          # typecheck + electron-vite production build
 pnpm smoke          # boots the app, checks bridge + vault round-trip, writes smoke.png
 pnpm smoke:job      # full render through the real UI against a local mock provider
+pnpm docs:pdf       # regenerate the manual PDF from docs/GUIDE.md
+pnpm docs:check     # verify the PDF: all sections, page count, encoding
 ```
 
 `smoke:job` generates a test clip with FFmpeg, serves it from
