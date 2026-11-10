@@ -1,0 +1,407 @@
+import { promises as fs } from 'node:fs'
+import { join } from 'node:path'
+import type { Artifact, Job, JobSpec, ProviderId, StageId } from '../../shared/contract'
+import { buildCompositionHtml, compositionDurationSeconds } from '../../shared/composition'
+import type { ProviderAdapter } from '../providers/types'
+import type { HttpClient } from '../providers/http'
+import type { Ffmpeg, MediaInfo } from '../ffmpeg'
+import { dimensionsFor } from '../ffmpeg'
+import type { OfficeCliInfo } from '../office'
+import { generateOfficeDocument, buildDeliveryDeckPrompt, buildStoryboardPrompt } from '../office'
+import { JobStore, newJob } from './store'
+
+export class CancelledError extends Error {
+  constructor() {
+    super('Cancelled')
+    this.name = 'CancelledError'
+  }
+}
+
+const STAGE_WEIGHT: Record<StageId, number> = {
+  validate: 3,
+  storyboard: 7,
+  generate: 44,
+  download: 12,
+  compose: 10,
+  render: 19,
+  export: 5
+}
+
+const GAP_AFTER: Record<StageId, number> = {
+  validate: 3,
+  storyboard: 10,
+  generate: 54,
+  download: 66,
+  compose: 76,
+  render: 95,
+  export: 100
+}
+
+/** Rough per-second list prices, shown only as an estimate before spending. */
+const COST_PER_SECOND: Record<ProviderId, number> = {
+  runway: 0.1,
+  luma: 0.09,
+  fal: 0.07,
+  replicate: 0.06,
+  heygen: 0.05,
+  openai: 0.1
+}
+
+export interface RunnerDeps {
+  store: JobStore
+  getKey(providerId: ProviderId): Promise<string | null>
+  getAdapter(providerId: ProviderId): ProviderAdapter
+  http: HttpClient
+  ffmpeg: Ffmpeg
+  office: { info: OfficeCliInfo }
+  workspaceRoot: string
+  /** Injected so the pipeline stays free of Electron imports (and testable). */
+  renderCards(options: {
+    html: string
+    durationSeconds: number
+    fps: number
+    width: number
+    height: number
+    framesDir: string
+    signal: AbortSignal
+  }): Promise<void>
+  onUpdate(job: Job): void
+  pollIntervalMs?: number
+  pollTimeoutMs?: number
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+export class JobRunner {
+  readonly #deps: RunnerDeps
+  readonly #queue: Job[] = []
+  readonly #controllers = new Map<string, AbortController>()
+  #draining = false
+
+  constructor(deps: RunnerDeps) {
+    this.#deps = deps
+  }
+
+  estimateCost(spec: JobSpec): number {
+    const perSecond = COST_PER_SECOND[spec.providerId] ?? 0.08
+    return Math.round(spec.shots.length * spec.durationSeconds * perSecond * 100) / 100
+  }
+
+  async enqueue(spec: JobSpec): Promise<Job> {
+    const job = newJob(spec)
+    job.costEstimateUsd = this.estimateCost(spec)
+    const saved = await this.#deps.store.save(job)
+    this.#queue.push(saved)
+    this.#deps.onUpdate(saved)
+    void this.#drain()
+    return saved
+  }
+
+  async cancel(jobId: string): Promise<Job | null> {
+    const controller = this.#controllers.get(jobId)
+    if (controller) controller.abort()
+    const queuedAt = this.#queue.findIndex((j) => j.id === jobId)
+    if (queuedAt >= 0) this.#queue.splice(queuedAt, 1)
+    const job = await this.#deps.store.get(jobId)
+    if (!job) return null
+    if (job.status === 'queued') {
+      return this.#deps.store.save({ ...job, status: 'cancelled', finishedAt: new Date().toISOString() })
+    }
+    return job
+  }
+
+  async #drain(): Promise<void> {
+    if (this.#draining) return
+    this.#draining = true
+    try {
+      while (this.#queue.length > 0) {
+        const job = this.#queue.shift()
+        if (!job) break
+        await this.#process(job)
+      }
+    } finally {
+      this.#draining = false
+    }
+  }
+
+  async #process(job: Job): Promise<void> {
+    const controller = new AbortController()
+    this.#controllers.set(job.id, controller)
+    let current: Job = { ...job, status: 'running' }
+    const emit = async (): Promise<void> => {
+      current = await this.#deps.store.save(current)
+      this.#deps.onUpdate(current)
+    }
+    await emit()
+
+    const workDir = join(this.#deps.workspaceRoot, 'projects', job.id)
+    const dirs = {
+      root: workDir,
+      clips: join(workDir, 'clips'),
+      frames: join(workDir, 'frames'),
+      out: join(this.#deps.workspaceRoot, 'output'),
+      docs: join(workDir, 'docs')
+    }
+
+    try {
+      for (const dir of Object.values(dirs)) await fs.mkdir(dir, { recursive: true })
+
+      await this.#stage(current, 'validate', controller, async () => {
+        if (!this.#deps.ffmpeg.available) {
+          throw new Error('FFmpeg and ffprobe must be installed (or set FRAMEFORGE_FFMPEG_DIR) before rendering.')
+        }
+        const key = await this.#deps.getKey(job.spec.providerId)
+        if (!key) throw new Error(`No API key stored for ${job.spec.providerId}. Add it in Settings → API keys.`)
+        return `Toolchain ready · key present for ${job.spec.providerId}`
+      }, emit)
+
+      const width = dimensionsFor(job.spec.aspect).width
+      const height = dimensionsFor(job.spec.aspect).height
+      const fps = 30
+
+      await this.#stage(current, 'storyboard', controller, async () => {
+        if (!job.spec.office.storyboard) return 'Skipped (not requested)'
+        const info = this.#deps.office.info
+        if (!info.available || !info.path) return 'Skipped (OfficeCLI not installed)'
+        const doc = await generateOfficeDocument({
+          binary: info.path,
+          kind: 'docx',
+          title: job.spec.title,
+          prompt: buildStoryboardPrompt(job.spec),
+          outDir: dirs.docs,
+          signal: controller.signal
+        })
+        current.artifacts.push(doc.artifact)
+        return `Storyboard written (${Math.round(doc.artifact.bytes / 1024)} KB)`
+      }, emit)
+
+      // ---- generate + download -------------------------------------------
+      const adapter = this.#deps.getAdapter(job.spec.providerId)
+      const key = (await this.#deps.getKey(job.spec.providerId)) as string
+      const clips: string[] = []
+
+      const generateStage = current.stages.find((s) => s.id === 'generate')
+      const downloadStage = current.stages.find((s) => s.id === 'download')
+      if (!generateStage || !downloadStage) throw new Error('Stage table is corrupt')
+
+      generateStage.status = 'running'
+      generateStage.startedAt = new Date().toISOString()
+      downloadStage.status = 'running'
+      downloadStage.startedAt = new Date().toISOString()
+      await emit()
+
+      for (const shot of job.spec.shots) {
+        this.#throwIfAborted(controller)
+        const remote = await adapter.submit(
+          {
+            prompt: shot.prompt,
+            durationSeconds: job.spec.durationSeconds,
+            aspect: job.spec.aspect,
+            model: job.spec.model
+          },
+          key
+        )
+        const deadline = Date.now() + (this.#deps.pollTimeoutMs ?? 20 * 60 * 1000)
+        let media: { url: string; headers?: Record<string, string> } | null = null
+        while (!media) {
+          this.#throwIfAborted(controller)
+          if (Date.now() > deadline) throw new Error(`Shot ${shot.index + 1} timed out waiting for the provider`)
+          const poll = await adapter.poll(remote, { key, model: job.spec.model })
+          if (poll.state === 'succeeded') {
+            media = poll.headers ? { url: poll.url, headers: poll.headers } : { url: poll.url }
+            break
+          }
+          if (poll.state === 'failed') throw new Error(`Shot ${shot.index + 1} failed: ${poll.error}`)
+          const perShot = (shot.index + poll.progress / 100) / job.spec.shots.length
+          current.progress = Math.round(GAP_AFTER.validate + (GAP_AFTER.generate - GAP_AFTER.validate) * perShot)
+          generateStage.detail = `Shot ${shot.index + 1}/${job.spec.shots.length} · ${poll.detail} ${poll.progress}%`
+          await emit()
+          await sleep(this.#deps.pollIntervalMs ?? 4_000)
+        }
+
+        const clipPath = join(dirs.clips, `shot-${String(shot.index + 1).padStart(2, '0')}.mp4`)
+        const { bytes } = await this.#deps.http.download(media.url, clipPath, media.headers)
+        clips.push(clipPath)
+        current.artifacts.push({
+          kind: 'clip',
+          label: `Shot ${shot.index + 1}`,
+          path: clipPath,
+          bytes,
+          createdAt: new Date().toISOString()
+        })
+        generateStage.detail = `Shot ${shot.index + 1}/${job.spec.shots.length} downloaded`
+        current.progress = Math.round(GAP_AFTER.validate + (GAP_AFTER.generate - GAP_AFTER.validate) * ((shot.index + 1) / job.spec.shots.length))
+        await emit()
+      }
+      generateStage.status = 'succeeded'
+      generateStage.endedAt = new Date().toISOString()
+      downloadStage.status = 'succeeded'
+      downloadStage.endedAt = new Date().toISOString()
+      downloadStage.detail = `${clips.length} clip(s) on disk`
+      await emit()
+
+      // ---- compose title cards -------------------------------------------
+      const { intro, outro } = compositionDurationSeconds(job.spec)
+      const cards: { intro: string; outro: string } = { intro: '', outro: '' }
+
+      await this.#stage(current, 'compose', controller, async () => {
+        const introHtml = buildCompositionHtml(job.spec, { kind: 'intro', width, height, durationSeconds: intro, fps })
+        current.compositionHtml = introHtml
+        await this.#deps.renderCards({
+          html: introHtml,
+          durationSeconds: intro,
+          fps,
+          width,
+          height,
+          framesDir: join(dirs.frames, 'intro'),
+          signal: controller.signal
+        })
+        current.progress = Math.round(GAP_AFTER.storyboard + (GAP_AFTER.compose - GAP_AFTER.storyboard) * 0.6)
+        await emit()
+
+        const outroHtml = buildCompositionHtml(job.spec, { kind: 'outro', width, height, durationSeconds: outro, fps })
+        await this.#deps.renderCards({
+          html: outroHtml,
+          durationSeconds: outro,
+          fps,
+          width,
+          height,
+          framesDir: join(dirs.frames, 'outro'),
+          signal: controller.signal
+        })
+        cards.intro = join(dirs.clips, 'card-intro.mp4')
+        cards.outro = join(dirs.clips, 'card-outro.mp4')
+        await this.#deps.ffmpeg.encodeFrames({ framesDir: join(dirs.frames, 'intro'), output: cards.intro, width, height, fps })
+        await this.#deps.ffmpeg.encodeFrames({ framesDir: join(dirs.frames, 'outro'), output: cards.outro, width, height, fps })
+        current.artifacts.push({
+          kind: 'composition',
+          label: 'Opening card',
+          path: cards.intro,
+          bytes: (await fs.stat(cards.intro)).size,
+          createdAt: new Date().toISOString()
+        })
+        return 'Title cards captured and encoded'
+      }, emit)
+
+      // ---- render ---------------------------------------------------------
+      let finalPath = ''
+      await this.#stage(current, 'render', controller, async () => {
+        for (const clip of [cards.intro, ...clips, cards.outro]) {
+          this.#throwIfAborted(controller)
+          const normalized = clip.replace(/\.mp4$/, '.norm.mp4')
+          const info: MediaInfo = await this.#deps.ffmpeg.normalize(clip, normalized, { width, height, fps, signal: controller.signal })
+          if (info.durationSeconds <= 0) throw new Error(`Normalised clip has no duration: ${clip}`)
+        }
+        current.progress = Math.round(GAP_AFTER.compose + (GAP_AFTER.render - GAP_AFTER.compose) * 0.5)
+        await emit()
+
+        const sequence = [cards.intro, ...clips, cards.outro].map((clip) => clip.replace(/\.mp4$/, '.norm.mp4'))
+        const assembled = join(dirs.root, 'assembled.mp4')
+        await this.#deps.ffmpeg.concat(sequence, assembled, {
+          width,
+          height,
+          fps,
+          transition: job.spec.transition,
+          signal: controller.signal
+        })
+        finalPath = join(dirs.out, `${job.spec.outputName}.mp4`)
+        await fs.copyFile(assembled, finalPath)
+        return `Assembled ${sequence.length} segments`
+      }, emit)
+
+      // ---- export ---------------------------------------------------------
+      await this.#stage(current, 'export', controller, async () => {
+        const info = await this.#deps.ffmpeg.probe(finalPath)
+        current.artifacts.push({
+          kind: 'video',
+          label: `${job.spec.outputName}.mp4`,
+          path: finalPath,
+          bytes: info.sizeBytes,
+          createdAt: new Date().toISOString()
+        })
+        const posterPath = join(dirs.out, `${job.spec.outputName}-poster.jpg`)
+        await this.#deps.ffmpeg.extractPoster(finalPath, posterPath, Math.min(1.5, info.durationSeconds / 2))
+        current.artifacts.push({
+          kind: 'poster',
+          label: 'Poster frame',
+          path: posterPath,
+          bytes: (await fs.stat(posterPath)).size,
+          createdAt: new Date().toISOString()
+        })
+
+        if (job.spec.office.deliveryDeck) {
+          const office = this.#deps.office.info
+          if (office.available && office.path) {
+            const deck = await generateOfficeDocument({
+              binary: office.path,
+              kind: 'pptx',
+              title: job.spec.title,
+              prompt: buildDeliveryDeckPrompt(job.spec),
+              outDir: dirs.docs,
+              signal: controller.signal
+            })
+            current.artifacts.push(deck.artifact)
+          }
+        }
+        return `${info.durationSeconds.toFixed(1)}s · ${(info.sizeBytes / 1_048_576).toFixed(1)} MB`
+      }, emit)
+
+      current.status = 'succeeded'
+      current.progress = 100
+      current.finishedAt = new Date().toISOString()
+      await emit()
+    } catch (error) {
+      const cancelled = error instanceof CancelledError || controller.signal.aborted
+      current.status = cancelled ? 'cancelled' : 'failed'
+      current.error = cancelled ? 'Cancelled by user' : error instanceof Error ? error.message : 'Unknown failure'
+      current.finishedAt = new Date().toISOString()
+      for (const stage of current.stages) {
+        if (stage.status === 'running') {
+          stage.status = 'failed'
+          stage.detail = current.error
+          stage.endedAt = new Date().toISOString()
+        }
+      }
+      await emit()
+    } finally {
+      this.#controllers.delete(job.id)
+    }
+  }
+
+  #throwIfAborted(controller: AbortController): void {
+    if (controller.signal.aborted) throw new CancelledError()
+  }
+
+  async #stage(
+    job: Job,
+    id: StageId,
+    controller: AbortController,
+    body: () => Promise<string | null>,
+    emit: () => Promise<void>
+  ): Promise<void> {
+    const stage = job.stages.find((s) => s.id === id)
+    if (!stage) throw new Error(`Unknown stage ${id}`)
+    if (stage.status === 'succeeded' || stage.status === 'skipped') return
+    stage.status = 'running'
+    stage.startedAt = new Date().toISOString()
+    job.progress = Math.max(job.progress, GAP_AFTER[id] - STAGE_WEIGHT[id])
+    await emit()
+    try {
+      this.#throwIfAborted(controller)
+      const detail = await body()
+      stage.status = detail && detail.startsWith('Skipped') ? 'skipped' : 'succeeded'
+      stage.detail = detail
+      stage.endedAt = new Date().toISOString()
+      job.progress = Math.max(job.progress, GAP_AFTER[id])
+    } catch (error) {
+      stage.status = 'failed'
+      stage.detail = error instanceof Error ? error.message : 'Stage failed'
+      stage.endedAt = new Date().toISOString()
+      throw error
+    } finally {
+      await emit()
+    }
+  }
+}
+
+export type { Artifact }
