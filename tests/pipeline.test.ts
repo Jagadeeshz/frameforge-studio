@@ -219,6 +219,94 @@ describe('job pipeline', () => {
     expect(calls.length).toBe(DEFAULT_TEST_SPEC.shots.length + 1)
   })
 
+  it('runs the free motion pipeline from model HTML to an encoded film', async () => {
+    const workspace = join(dir, 'run-motion')
+    const received: string[] = []
+    const scenesJson = JSON.stringify({
+      scenes: [
+        { title: 'Open', durationSeconds: 3, html: '<!doctype html><html><body><h1 style="color:#fff">Built</h1><script>alert(1)</script></body></html>' },
+        { title: 'Close', durationSeconds: 3, html: '<!doctype html><html><body><h1 style="color:#fff">Ship</h1></body></html>' }
+      ]
+    })
+    const fakeLlm: LlmClient = {
+      config: { name: 'Mock LLM', baseUrl: 'http://127.0.0.1:1/v1', model: 'mock-model' },
+      async verify() {
+        return { ok: true, message: 'ok' }
+      },
+      async complete() {
+        return scenesJson
+      }
+    }
+
+    const tools = await locateFfmpeg()
+    const registry = createProviderRegistry({ baseUrls: { runway: base }, allowLoopback: true })
+    const store = new JobStore(join(workspace, 'jobs'))
+    await store.init()
+
+    const runner = new JobRunner({
+      store,
+      getKey: async () => null,
+      getAdapter: (id) => registry.get(id),
+      http: registry.http,
+      ffmpeg: new Ffmpeg(tools),
+      office: { info: { available: false, path: null, version: null, mode: 'unknown' } },
+      getLlm: async () => fakeLlm,
+      workspaceRoot: workspace,
+      onUpdate: () => undefined,
+      renderCards: async ({ html, width, height, framesDir, durationSeconds, fps }) => {
+        received.push(html)
+        await fs.mkdir(framesDir, { recursive: true })
+        const seed = join(framesDir, 'seed.png')
+        await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `color=c=#101018:s=${width}x${height}:d=1`, '-frames:v', '1', seed])
+        const png = await fs.readFile(seed)
+        for (let i = 0; i < Math.round(durationSeconds * fps); i += 1) {
+          await fs.writeFile(join(framesDir, `frame_${String(i).padStart(5, '0')}.png`), png)
+        }
+      }
+    })
+
+    const queued = await runner.enqueue({
+      ...DEFAULT_TEST_SPEC,
+      providerId: 'motion',
+      title: 'Motion test',
+      model: 'mock-model',
+      durationSeconds: 10,
+      scenes: 2,
+      shots: [],
+      brief: 'A ten second kinetic type test.',
+      office: { storyboard: true, deliveryDeck: false }
+    })
+    const finished = await waitForFinish(store, queued.id)
+
+    expect(finished.status, finished.error ?? '').toBe('succeeded')
+    expect(finished.costEstimateUsd).toBe(0)
+
+    const byId = Object.fromEntries(finished.stages.map((stage) => [stage.id, stage]))
+    expect(byId.storyboard?.status).toBe('succeeded')
+    expect(byId.download?.status).toBe('skipped')
+    expect(byId.generate?.status).toBe('succeeded')
+
+    // Scene HTML reached the renderer, with the model's script stripped and our
+    // driver injected instead. Bookends also contain <h1>, so match scene copy.
+    const sceneDocs = received.filter((html) => html.includes('>Built<') || html.includes('>Ship<'))
+    expect(sceneDocs).toHaveLength(2)
+    expect(sceneDocs.every((html) => html.includes('window.__ff'))).toBe(true)
+    expect(sceneDocs.some((html) => html.includes('alert(1)'))).toBe(false)
+
+    const storyboard = finished.artifacts.find((artifact) => artifact.kind === 'storyboard')
+    expect(storyboard?.path.endsWith('storyboard.json')).toBe(true)
+    const saved = JSON.parse(await fs.readFile(storyboard!.path, 'utf8')) as { scenes: unknown[] }
+    expect(saved.scenes).toHaveLength(2)
+
+    const video = finished.artifacts.find((artifact) => artifact.kind === 'video')
+    const info = await new Ffmpeg(tools).probe(video!.path)
+    expect(info.width).toBe(1920)
+    expect(info.height).toBe(1080)
+    expect(info.videoCodec).toBe('h264')
+    // 10s of scenes plus the two bookends.
+    expect(info.durationSeconds).toBeGreaterThan(12)
+  }, 180_000)
+
   it('cancels a job stuck waiting on the provider', async () => {
     const workspace = join(dir, 'run-cancel')
     const { runner, store } = await buildRunner(workspace)

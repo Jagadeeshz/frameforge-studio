@@ -1,9 +1,11 @@
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import type { Artifact, Job, JobSpec, ProviderId, StageId } from '../../shared/contract'
+import { MOTION_PROVIDER_ID } from '../../shared/contract'
 import { buildCompositionHtml, compositionDurationSeconds } from '../../shared/composition'
 import type { ProviderAdapter } from '../providers/types'
 import { buildEnhanceRequest, buildStoryboardRequest, cleanEnhancement, type LlmClient } from '../providers/llm'
+import { buildSceneRequest, fallbackSceneHtml, parseStoryboard, sceneDocument, type Scene } from '../scenes'
 import type { HttpClient } from '../providers/http'
 import type { Ffmpeg, MediaInfo } from '../ffmpeg'
 import { dimensionsFor } from '../ffmpeg'
@@ -86,7 +88,10 @@ export class JobRunner {
   }
 
   estimateCost(spec: JobSpec): number {
-    const perSecond = COST_PER_SECOND[spec.providerId] ?? 0.08
+    // Motion mode spends nothing on video: the LLM writes HTML and the machine
+    // renders it, so there is no per-second vendor rate to estimate.
+    if (spec.providerId === MOTION_PROVIDER_ID) return 0
+    const perSecond = COST_PER_SECOND[spec.providerId as ProviderId] ?? 0.08
     return Math.round(spec.shots.length * spec.durationSeconds * perSecond * 100) / 100
   }
 
@@ -149,13 +154,204 @@ export class JobRunner {
     try {
       for (const dir of Object.values(dirs)) await fs.mkdir(dir, { recursive: true })
 
+      // ---- free motion-scene pipeline -------------------------------------
+      // The LLM writes animated HTML; this machine renders and encodes it. No
+      // video API, no per-second vendor cost.
+      if (job.spec.providerId === MOTION_PROVIDER_ID) {
+        const width = dimensionsFor(job.spec.aspect).width
+        const height = dimensionsFor(job.spec.aspect).height
+        const fps = 30
+        let model: LlmClient | null = null
+
+        await this.#stage(current, 'validate', controller, async () => {
+          if (!this.#deps.ffmpeg.available) {
+            throw new Error('FFmpeg and ffprobe must be installed (or set FRAMEFORGE_FFMPEG_DIR) before rendering.')
+          }
+          model = this.#deps.getLlm ? await this.#deps.getLlm() : null
+          if (!model) {
+            throw new Error('Add your DeepSeek (or any OpenAI-compatible) key under Keys to generate scenes.')
+          }
+          if (!job.spec.brief.trim()) throw new Error('Write a brief — it is the source of every scene.')
+          return `Toolchain ready · ${model.config.name} (${model.config.model})`
+        }, emit)
+
+        if (!model) throw new Error('No LLM configured')
+        const sceneModel: LlmClient = model
+        let scenes: Scene[] = []
+
+        await this.#stage(current, 'storyboard', controller, async () => {
+          const request = buildSceneRequest(job.spec, { width, height, providerLabel: sceneModel.config.name })
+          const reply = await sceneModel.complete({ system: request.system, prompt: request.prompt, maxTokens: 4000 })
+          scenes = parseStoryboard(reply, job.spec)
+
+          const path = join(dirs.docs, 'storyboard.json')
+          await fs.mkdir(dirs.docs, { recursive: true })
+          await fs.writeFile(
+            path,
+            JSON.stringify(
+              {
+                title: job.spec.title,
+                durationSeconds: job.spec.durationSeconds,
+                scenes: scenes.map((scene) => ({ title: scene.title, durationSeconds: scene.durationSeconds, htmlBytes: scene.html.length }))
+              },
+              null,
+              2
+            ),
+            'utf8'
+          )
+          current.artifacts.push({
+            kind: 'storyboard',
+            label: `${scenes.length} scenes · ${sceneModel.config.model}`,
+            path,
+            bytes: (await fs.stat(path)).size,
+            createdAt: new Date().toISOString()
+          })
+          const total = scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)
+          return `${scenes.length} scenes · ${total.toFixed(1)}s storyboarded`
+        }, emit)
+
+        // Nothing is fetched in this mode, so the stage is informational only.
+        const downloadStage = current.stages.find((stage) => stage.id === 'download')
+        if (downloadStage) {
+          downloadStage.status = 'skipped'
+          downloadStage.detail = 'Scenes render locally — nothing to download'
+          downloadStage.endedAt = new Date().toISOString()
+          await emit()
+        }
+
+        const scenePaths: string[] = []
+        await this.#stage(current, 'generate', controller, async () => {
+          const generateStage = current.stages.find((stage) => stage.id === 'generate')
+          let fallbacks = 0
+          for (const [index, scene] of scenes.entries()) {
+            this.#throwIfAborted(controller)
+            const label = `scene-${String(index + 1).padStart(2, '0')}`
+            const framesDir = join(dirs.frames, label)
+            const output = join(dirs.clips, `${label}.mp4`)
+
+            try {
+              await this.#deps.renderCards({
+                html: sceneDocument(scene),
+                durationSeconds: scene.durationSeconds,
+                fps,
+                width,
+                height,
+                framesDir,
+                signal: controller.signal
+              })
+            } catch (error) {
+              if (controller.signal.aborted) throw error
+              // One unusable scene must not lose the whole film.
+              fallbacks += 1
+              await this.#deps.renderCards({
+                html: fallbackSceneHtml(scene, job.spec, width, height),
+                durationSeconds: scene.durationSeconds,
+                fps,
+                width,
+                height,
+                framesDir,
+                signal: controller.signal
+              })
+            }
+
+            await this.#deps.ffmpeg.encodeFrames({ framesDir, output, width, height, fps, signal: controller.signal })
+            scenePaths.push(output)
+            if (generateStage) {
+              generateStage.detail = `Scene ${index + 1}/${scenes.length} · ${scene.durationSeconds}s${fallbacks ? ` · ${fallbacks} fallback` : ''}`
+            }
+            current.progress = Math.round(
+              GAP_AFTER.validate + (GAP_AFTER.generate - GAP_AFTER.validate) * ((index + 1) / scenes.length)
+            )
+            await emit()
+          }
+          return `${scenePaths.length} scenes rendered${fallbacks ? ` (${fallbacks} fallback)` : ''}`
+        }, emit)
+
+        const { intro, outro } = compositionDurationSeconds(job.spec)
+        const cards = { intro: join(dirs.clips, 'card-intro.mp4'), outro: join(dirs.clips, 'card-outro.mp4') }
+
+        await this.#stage(current, 'compose', controller, async () => {
+          const introHtml = buildCompositionHtml(job.spec, { kind: 'intro', width, height, durationSeconds: intro, fps })
+          current.compositionHtml = introHtml
+          await this.#deps.renderCards({ html: introHtml, durationSeconds: intro, fps, width, height, framesDir: join(dirs.frames, 'intro'), signal: controller.signal })
+          current.progress = Math.round(GAP_AFTER.storyboard + (GAP_AFTER.compose - GAP_AFTER.storyboard) * 0.6)
+          await emit()
+
+          const outroHtml = buildCompositionHtml(job.spec, { kind: 'outro', width, height, durationSeconds: outro, fps })
+          await this.#deps.renderCards({ html: outroHtml, durationSeconds: outro, fps, width, height, framesDir: join(dirs.frames, 'outro'), signal: controller.signal })
+          await this.#deps.ffmpeg.encodeFrames({ framesDir: join(dirs.frames, 'intro'), output: cards.intro, width, height, fps })
+          await this.#deps.ffmpeg.encodeFrames({ framesDir: join(dirs.frames, 'outro'), output: cards.outro, width, height, fps })
+          current.artifacts.push({
+            kind: 'composition',
+            label: 'Opening card',
+            path: cards.intro,
+            bytes: (await fs.stat(cards.intro)).size,
+            createdAt: new Date().toISOString()
+          })
+          return 'Title cards captured and encoded'
+        }, emit)
+
+        let motionFinal = ''
+        await this.#stage(current, 'render', controller, async () => {
+          const sequence = [cards.intro, ...scenePaths, cards.outro]
+          const normalised: string[] = []
+          for (const clip of sequence) {
+            this.#throwIfAborted(controller)
+            const target = clip.replace(/\.mp4$/, '.norm.mp4')
+            await this.#deps.ffmpeg.normalize(clip, target, { width, height, fps, signal: controller.signal })
+            normalised.push(target)
+          }
+          const assembled = join(dirs.root, 'assembled.mp4')
+          await this.#deps.ffmpeg.concat(normalised, assembled, {
+            width,
+            height,
+            fps,
+            transition: job.spec.transition,
+            signal: controller.signal
+          })
+          motionFinal = join(dirs.out, `${job.spec.outputName}.mp4`)
+          await fs.copyFile(assembled, motionFinal)
+          return `Assembled ${sequence.length} segments`
+        }, emit)
+
+        await this.#stage(current, 'export', controller, async () => {
+          const info = await this.#deps.ffmpeg.probe(motionFinal)
+          current.artifacts.push({
+            kind: 'video',
+            label: `${job.spec.outputName}.mp4`,
+            path: motionFinal,
+            bytes: info.sizeBytes,
+            createdAt: new Date().toISOString()
+          })
+          const posterPath = join(dirs.out, `${job.spec.outputName}-poster.jpg`)
+          await this.#deps.ffmpeg.extractPoster(motionFinal, posterPath, Math.min(1.5, info.durationSeconds / 2))
+          current.artifacts.push({
+            kind: 'poster',
+            label: 'Poster frame',
+            path: posterPath,
+            bytes: (await fs.stat(posterPath)).size,
+            createdAt: new Date().toISOString()
+          })
+          return `${info.durationSeconds.toFixed(1)}s · ${(info.sizeBytes / 1_048_576).toFixed(1)} MB`
+        }, emit)
+
+        current.status = 'succeeded'
+        current.progress = 100
+        current.finishedAt = new Date().toISOString()
+        await emit()
+        return
+      }
+
+      // From here on this is a video-provider job.
+      const providerId = job.spec.providerId as ProviderId
+
       await this.#stage(current, 'validate', controller, async () => {
         if (!this.#deps.ffmpeg.available) {
           throw new Error('FFmpeg and ffprobe must be installed (or set FRAMEFORGE_FFMPEG_DIR) before rendering.')
         }
-        const key = await this.#deps.getKey(job.spec.providerId)
-        if (!key) throw new Error(`No API key stored for ${job.spec.providerId}. Add it in Settings → API keys.`)
-        return `Toolchain ready · key present for ${job.spec.providerId}`
+        const key = await this.#deps.getKey(providerId)
+        if (!key) throw new Error(`No API key stored for ${providerId}. Add it in Settings → API keys.`)
+        return `Toolchain ready · key present for ${providerId}`
       }, emit)
 
       const width = dimensionsFor(job.spec.aspect).width
@@ -199,8 +395,8 @@ export class JobRunner {
       }, emit)
 
       // ---- generate + download -------------------------------------------
-      const adapter = this.#deps.getAdapter(job.spec.providerId)
-      const key = (await this.#deps.getKey(job.spec.providerId)) as string
+      const adapter = this.#deps.getAdapter(providerId)
+      const key = (await this.#deps.getKey(providerId)) as string
       const clips: string[] = []
 
       const generateStage = current.stages.find((s) => s.id === 'generate')

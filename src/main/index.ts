@@ -36,24 +36,26 @@ const PACKAGE_VERSIONS: Record<string, string | undefined> = {
 
 /** Deterministic spec used by `FRAMEFORGE_SMOKE_JOB=1` end-to-end checks. */
 const SMOKE_JOB_SPEC = {
-  title: 'Smoke Render',
-  providerId: 'runway' as const,
-  model: 'gen4_turbo',
+  title: 'Smoke Motion',
+  providerId: 'motion' as const,
+  model: 'smoke-model',
   aspect: '16:9' as const,
-  durationSeconds: 4 as const,
-  shots: [
-    { index: 0, prompt: 'Slow orbit around a matte black pedestal, violet rim light' },
-    { index: 1, prompt: 'Macro detail of brushed aluminium, soft morning light' }
-  ],
+  durationSeconds: 12 as const,
+  shots: [],
+  brief:
+    'A twelve-second kinetic-type teaser: "Built for the next launch", geometric shapes locking into place, ' +
+    'violet-to-cyan gradient, confident technical tone.',
+  scenes: 3,
   transition: 'crossfade' as const,
   titles: {
     enabled: true,
-    headline: 'Smoke Render',
-    subhead: 'FrameForge · end-to-end check',
+    headline: 'Smoke Motion',
+    subhead: 'FrameForge · free render',
     accent: '#7C5CFF'
   },
-  office: { storyboard: false, deliveryDeck: false },
-  outputName: 'smoke-render'
+  office: { storyboard: true, deliveryDeck: false },
+  enhancePrompts: false,
+  outputName: 'smoke-motion'
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -314,7 +316,9 @@ function runSmoke(
           }
           jobResult = await win.webContents.executeJavaScript(`(async () => {
             const bridge = window.frameforge
-            await bridge.vault.set({ providerId: 'runway', key: 'smoke-run-key-123456789' })
+            if (${JSON.stringify(spec.providerId !== 'motion')}) {
+              await bridge.vault.set({ providerId: ${JSON.stringify(spec.providerId)}, key: 'smoke-run-key-123456789' })
+            }
             const created = await bridge.jobs.create(${JSON.stringify(spec)})
             let job = created
             for (let i = 0; i < 300; i += 1) {

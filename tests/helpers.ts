@@ -19,5 +19,7 @@ export const DEFAULT_TEST_SPEC: JobSpec = {
   },
   office: { storyboard: false, deliveryDeck: false },
   enhancePrompts: false,
+  brief: 'A short product teaser with kinetic type.',
+  scenes: 3,
   outputName: 'test-reel'
 }

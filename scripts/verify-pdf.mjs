@@ -42,8 +42,8 @@ const required = [
   'The interface',
   'API keys',
   'Making your first video',
-  'Writing shots',
-  'Providers, cost and timing',
+  'Writing the brief',
+  'Cost and timing',
   'Files and folders',
   'Checking your installation',
   'Troubleshooting',
@@ -60,7 +60,8 @@ check(all.includes('Validate inputs & toolchain'), 'stage table content')
 // pdf.js inserts spaces where a subset font's glyph runs split, so compare the
 // monospace strings with all whitespace removed.
 const compact = all.replace(/\s+/g, '')
-check(compact.includes('api.dev.runwayml.com'), 'host allowlist table')
+check(compact.includes('default-src'), 'capture csp documented')
+check(compact.includes('$0.00'), 'free render cost')
 check(compact.includes('FRAMEFORGE_FFMPEG_DIR'), 'environment variables')
 check(compact.includes('provider:<id>'), 'vault account naming')
 

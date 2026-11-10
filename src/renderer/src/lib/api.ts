@@ -6,28 +6,17 @@ export const api = (): Window['frameforge'] => {
 }
 
 export const DEFAULT_SPEC: JobSpec = {
-  title: 'Q4 Launch — Product Teaser',
-  providerId: 'runway',
-  model: 'gen4_turbo',
+  title: 'Q4 Launch — Motion Teaser',
+  providerId: 'motion',
+  model: 'deepseek-chat',
   aspect: '16:9',
-  durationSeconds: 5,
-  shots: [
-    {
-      index: 0,
-      prompt:
-        'Slow dolly through a sun-drenched design studio, industrial concrete and warm wood, soft volumetric light, shallow depth of field, cinematic 35mm'
-    },
-    {
-      index: 1,
-      prompt:
-        'Macro of a hand sketching a product wireframe on paper, morning light raking across the desk, subtle dust in the air, film grain'
-    },
-    {
-      index: 2,
-      prompt:
-        'Product hero shot rotating on a matte black pedestal, rim light and violet accent glow, slow orbit, premium commercial lighting'
-    }
-  ],
+  durationSeconds: 15,
+  shots: [],
+  brief:
+    'A 15-second kinetic-typography teaser for a Q4 product launch. Open on the line "Built for the next launch", ' +
+    'then build momentum with the words Ship, Measure, Repeat — geometric shapes locking into place, a violet-to-cyan ' +
+    'gradient field, and a final card pointing at quantocos.com. Confident, technical, no stock imagery.',
+  scenes: 4,
   transition: 'crossfade',
   titles: {
     enabled: true,

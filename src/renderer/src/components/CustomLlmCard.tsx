@@ -102,8 +102,8 @@ export function CustomLlmCard({
             {ready ? <Pill label="ready" state="ok" /> : <Pill label={configured ? 'add key' : 'not configured'} state="idle" />}
           </div>
           <div className="ff-hint" style={{ marginTop: 6, maxWidth: 640 }}>
-            Any OpenAI-compatible chat endpoint. Used for the storyboard brief and for rewriting shot
-            prompts before generation — not for video, which still goes to the provider you pick in Studio.
+            Any OpenAI-compatible chat endpoint. It writes the animated scenes that this machine renders into
+            your film, so it is the only key the app needs — there is no video API anywhere in this build.
           </div>
         </div>
         <span className="ff-kbd">/chat/completions</span>

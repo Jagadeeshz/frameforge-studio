@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Clapperboard, KeyRound, ListChecks, MonitorCog, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { Clapperboard, KeyRound, ListChecks, MonitorCog, AlertTriangle, CheckCircle2, Wand2 } from 'lucide-react'
 import { Tabs, TabsList, Tab } from '@hyperframes/studio/ui'
-import type { Job, JobSpec, LlmSettings, ProviderDescriptor, SystemProbe, VaultStatus } from '../../shared/contract'
+import type { Job, JobSpec, LlmSettings, SystemProbe, VaultStatus } from '../../shared/contract'
 import { api, DEFAULT_SPEC, upsertJob } from './lib/api'
 import { Pill } from './components/Bits'
 import { StudioView } from './components/StudioView'
@@ -21,7 +21,6 @@ export function App(): ReactNode {
   const [probe, setProbe] = useState<SystemProbe | null>(null)
   const [vault, setVault] = useState<VaultStatus | null>(null)
   const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null)
-  const [providers, setProviders] = useState<ProviderDescriptor[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
   const [spec, setSpec] = useState<JobSpec>(DEFAULT_SPEC)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -35,17 +34,15 @@ export function App(): ReactNode {
     const boot = async (): Promise<void> => {
       try {
         const bridge = api()
-        const [probeResult, vaultResult, providerResult, jobResult, llmResult] = await Promise.all([
+        const [probeResult, vaultResult, jobResult, llmResult] = await Promise.all([
           bridge.systemProbe(),
           bridge.vault.status(),
-          bridge.providers.list(),
           bridge.jobs.list(),
           bridge.llm.settings()
         ])
         if (cancelled) return
         setProbe(probeResult)
         setVault(vaultResult)
-        setProviders(providerResult)
         setJobs(jobResult)
         setLlmSettings(llmResult)
         if (jobResult[0]) setSelectedJobId(jobResult[0].id)
@@ -60,15 +57,15 @@ export function App(): ReactNode {
   }, [])
 
   useEffect(() => {
-    const bridge = api()
-    const unsubscribe = bridge.jobs.onEvent((job) => {
+    const unsubscribe = api().jobs.onEvent((job) => {
       setJobs((prev) => upsertJob(prev, job))
       setSelectedJobId((current) => current ?? job.id)
     })
     return unsubscribe
   }, [])
 
-  // Live composition preview: debounced so typing does not thrash Chromium.
+  // The bookend card is the only thing previewable before a run; scenes are
+  // written by the model at render time.
   useEffect(() => {
     const timer = setTimeout(() => {
       void (async () => {
@@ -76,20 +73,15 @@ export function App(): ReactNode {
           const { url } = await api().composition.preview(spec)
           setPreviewUrl(url)
         } catch {
-          // A preview failure should never block authoring.
+          // A preview failure must never block authoring.
         }
       })()
     }, 420)
     return () => clearTimeout(timer)
   }, [spec])
 
-  const configured = useMemo(() => {
-    const map = new Map<string, boolean>()
-    for (const entry of vault?.providers ?? []) map.set(entry.providerId, entry.configured)
-    return map
-  }, [vault])
-
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) ?? null, [jobs, selectedJobId])
+  const llmLabel = llmSettings?.custom ? `${llmSettings.custom.name} · ${llmSettings.custom.model}` : null
 
   const handleRender = useCallback(async (): Promise<void> => {
     setSubmitting(true)
@@ -107,21 +99,6 @@ export function App(): ReactNode {
     }
   }, [spec])
 
-  const handleKeySave = useCallback(async (providerId: JobSpec['providerId'], key: string): Promise<void> => {
-    const status = await api().vault.set({ providerId, key })
-    setVault(status)
-  }, [])
-
-  const handleKeyRemove = useCallback(async (providerId: JobSpec['providerId']): Promise<void> => {
-    const status = await api().vault.remove(providerId)
-    setVault(status)
-  }, [])
-
-  const handleVaultRefresh = useCallback(async (): Promise<void> => {
-    setVault(await api().vault.status())
-  }, [])
-
-  /** The custom provider touches both stores, so refresh them together. */
   const handleLlmChanged = useCallback(async (): Promise<void> => {
     const [status, settings] = await Promise.all([api().vault.status(), api().llm.settings()])
     setVault(status)
@@ -148,7 +125,7 @@ export function App(): ReactNode {
           <div className="ff-brand-mark">FF</div>
           <div>
             <div className="ff-brand-title">FrameForge Studio</div>
-            <div className="ff-brand-sub">Local render · BYO keys</div>
+            <div className="ff-brand-sub">Free motion render · BYO model</div>
           </div>
         </div>
 
@@ -205,18 +182,22 @@ export function App(): ReactNode {
             <StudioView
               spec={spec}
               onChange={setSpec}
-              providers={providers}
-              configured={configured}
-              previewUrl={previewUrl}
               submitting={submitting}
               onRender={() => void handleRender()}
               ffmpegReady={probe?.ffmpeg.available ?? false}
-              officeReady={probe?.officecli.available ?? false}
-              llmLabel={llmSettings?.custom ? `${llmSettings.custom.name} · ${llmSettings.custom.model}` : null}
+              llmLabel={llmLabel}
               onOpenKeys={() => setTab('keys')}
             />
             <section className="ff-pane">
-              <PreviewStage spec={spec} previewUrl={previewUrl} onRender={() => void handleRender()} submitting={submitting} recent={jobs[0] ?? null} configured={configured} />
+              <PreviewStage
+                spec={spec}
+                previewUrl={previewUrl}
+                onRender={() => void handleRender()}
+                submitting={submitting}
+                recent={jobs[0] ?? null}
+                llmReady={Boolean(llmLabel)}
+                onOpenKeys={() => setTab('keys')}
+              />
             </section>
           </>
         ) : null}
@@ -240,20 +221,11 @@ export function App(): ReactNode {
           />
         ) : null}
 
-        {tab === 'keys' ? (
-          <KeysView
-            providers={providers}
-            vault={vault}
-            llmSettings={llmSettings}
-            onSave={handleKeySave}
-            onRemove={handleKeyRemove}
-            onTest={async (providerId) => api().vault.test({ providerId })}
-            onRefresh={handleVaultRefresh}
-            onLlmChanged={handleLlmChanged}
-          />
-        ) : null}
+        {tab === 'keys' ? <KeysView vault={vault} llmSettings={llmSettings} onLlmChanged={handleLlmChanged} /> : null}
 
-        {tab === 'system' ? <SystemView probe={probe} vault={vault} onRefresh={async () => setProbe(await api().systemProbe())} /> : null}
+        {tab === 'system' ? (
+          <SystemView probe={probe} vault={vault} onRefresh={async () => setProbe(await api().systemProbe())} />
+        ) : null}
       </main>
 
       {banner ? (
@@ -273,28 +245,25 @@ export function App(): ReactNode {
   )
 }
 
-export function PreviewStage({
+function PreviewStage({
   spec,
   previewUrl,
   onRender,
   submitting,
   recent,
-  configured
+  llmReady,
+  onOpenKeys
 }: {
   spec: JobSpec
   previewUrl: string | null
   onRender: () => void
   submitting: boolean
   recent: Job | null
-  configured: Map<string, boolean>
+  llmReady: boolean
+  onOpenKeys: () => void
 }): ReactNode {
-  const dims =
-    spec.aspect === '16:9' ? { w: 1920, h: 1080 } : spec.aspect === '9:16' ? { w: 1080, h: 1920 } : { w: 1080, h: 1080 }
-  const keyReady = configured.get(spec.providerId) === true
+  const dims = spec.aspect === '16:9' ? { w: 1920, h: 1080 } : spec.aspect === '9:16' ? { w: 1080, h: 1920 } : { w: 1080, h: 1080 }
 
-  // The card is authored at full output resolution, so the preview renders it
-  // 1:1 and scales the frame down — squeezing the document itself would reflow
-  // the layout and clip the type.
   const stageRef = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(0)
 
@@ -312,12 +281,14 @@ export function PreviewStage({
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div>
-          <div className="ff-label">Composition preview</div>
+          <div className="ff-label">Bookend preview</div>
           <div className="ff-h2" style={{ marginTop: 4 }}>
-            Opening card · rendered by Chromium, encoded by FFmpeg
+            Opening card · generated scenes render at run time
           </div>
         </div>
-        <span className="ff-kbd">{spec.aspect} · {spec.durationSeconds}s × {spec.shots.length}</span>
+        <span className="ff-kbd">
+          {spec.aspect} · {spec.scenes} scenes · {spec.durationSeconds}s
+        </span>
       </div>
 
       <div
@@ -325,11 +296,11 @@ export function PreviewStage({
         className="ff-preview"
         style={{ aspectRatio: `${dims.w} / ${dims.h}`, width: '100%', maxWidth: spec.aspect === '9:16' ? 260 : undefined, margin: '0 auto' }}
       >
-        <span className="ff-preview-badge">HyperFrames composition · live</span>
+        <span className="ff-preview-badge">Brand bookend · live</span>
         {previewUrl && scale > 0 ? (
           <div style={{ width: dims.w, height: dims.h, transform: `scale(${scale})`, transformOrigin: 'top left' }}>
             <iframe
-              title="Composition preview"
+              title="Bookend preview"
               src={previewUrl}
               width={dims.w}
               height={dims.h}
@@ -339,7 +310,7 @@ export function PreviewStage({
           </div>
         ) : (
           <div className="ff-empty" style={{ border: 0, height: '100%' }}>
-            Building composition…
+            Building preview…
           </div>
         )}
       </div>
@@ -348,17 +319,16 @@ export function PreviewStage({
         <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
           <span className="ff-label">Render plan</span>
           <span className="ff-mono" style={{ color: 'var(--ff-dim)' }}>
-            {spec.shots.length} shots · {spec.shots.length * spec.durationSeconds}s source
+            {spec.scenes} scenes · {spec.durationSeconds}s · 30 fps
           </span>
         </div>
         <ol style={{ display: 'grid', gap: 8, margin: 0, padding: 0, listStyle: 'none' }}>
           {[
-            ['Storyboard', spec.office.storyboard ? 'OfficeCLI · .docx' : 'skipped'],
-            ['Generate', `${spec.providerId} · ${spec.model}`],
-            ['Download', 'direct to project folder'],
-            ['Compose', 'title cards · Chromium capture'],
-            ['Render', 'FFmpeg · H.264 · yuv420p'],
-            ['Export', spec.office.deliveryDeck ? 'MP4 + poster + .pptx' : 'MP4 + poster']
+            ['Storyboard', 'your model · HTML per scene'],
+            ['Scenes', 'Chromium frame capture'],
+            ['Bookends', 'brand cards · capture'],
+            ['Encode', 'FFmpeg · H.264 · yuv420p'],
+            ['Export', 'MP4 + poster + scene list']
           ].map(([label, detail]) => (
             <li key={label} className="flex items-center justify-between" style={{ fontSize: 12 }}>
               <span style={{ color: 'var(--ff-ink)' }}>{label}</span>
@@ -368,9 +338,18 @@ export function PreviewStage({
         </ol>
       </div>
 
-      {!keyReady ? (
+      {!llmReady ? (
         <div className="ff-warn">
-          No key stored for <strong>{spec.providerId}</strong>. Add it under Keys — it is kept in the OS credential store and never leaves this machine.
+          <div className="ff-row" style={{ gap: 8 }}>
+            <Wand2 size={14} />
+            <span>
+              No language model configured. Scenes are written by your own model —{' '}
+              <button className="ff-link" onClick={onOpenKeys}>
+                add a key
+              </button>{' '}
+              (DeepSeek, OpenRouter, Groq, Ollama…).
+            </span>
+          </div>
         </div>
       ) : null}
 
@@ -386,7 +365,7 @@ export function PreviewStage({
             <span style={{ width: `${recent.progress}%` }} />
           </div>
           <div className="ff-hint" style={{ marginTop: 8 }}>
-            {recent.error ?? recent.stages.find((stage) => stage.status === 'running')?.label ?? `${recent.artifacts.length} artifact(s)`}
+            {recent.error ?? recent.stages.find((stage) => stage.status === 'running')?.detail ?? `${recent.artifacts.length} artifact(s)`}
           </div>
         </div>
       ) : null}

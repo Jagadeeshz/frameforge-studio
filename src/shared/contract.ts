@@ -29,6 +29,16 @@ export const vaultKeyIdSchema = z.union([providerIdSchema, z.literal(CUSTOM_LLM_
 export type VaultKeyId = z.infer<typeof vaultKeyIdSchema>
 export const VAULT_KEY_IDS: readonly VaultKeyId[] = [...PROVIDER_IDS, CUSTOM_LLM_ID]
 
+/**
+ * The free render path: the user's LLM writes animated HTML scenes that this
+ * machine renders with Chromium and encodes with FFmpeg. It is a job provider
+ * id so records stay self-describing, but it is not a video API and never
+ * appears in the provider registry.
+ */
+export const MOTION_PROVIDER_ID = 'motion' as const
+export const jobProviderIdSchema = z.union([providerIdSchema, z.literal(MOTION_PROVIDER_ID)])
+export type JobProviderId = z.infer<typeof jobProviderIdSchema>
+
 export const aspectSchema = z.enum(['16:9', '9:16', '1:1'])
 export type Aspect = z.infer<typeof aspectSchema>
 
@@ -128,11 +138,16 @@ export type Shot = z.infer<typeof shotSchema>
 
 export const jobSpecSchema = z.object({
   title: z.string().min(1).max(120),
-  providerId: providerIdSchema,
+  providerId: jobProviderIdSchema,
   model: z.string().min(1).max(120),
   aspect: aspectSchema,
-  durationSeconds: z.union([z.literal(4), z.literal(5), z.literal(6), z.literal(8), z.literal(10)]),
-  shots: z.array(shotSchema).min(1).max(6),
+  /** Motion mode: total film length. Provider mode: length of each shot. */
+  durationSeconds: z.number().int().min(4).max(60),
+  shots: z.array(shotSchema).max(6),
+  /** Motion mode: the single free-text brief the scenes are generated from. */
+  brief: z.string().max(4000).default(''),
+  /** Motion mode: how many scenes the storyboard should contain. */
+  scenes: z.number().int().min(1).max(8).default(4),
   transition: transitionSchema,
   titles: z.object({
     enabled: z.boolean(),
@@ -211,7 +226,6 @@ export const jobSchema = z.object({
 export type Job = z.infer<typeof jobSchema>
 
 export const jobIdSchema = z.object({ jobId: z.string().min(1).max(80) })
-
 export const systemProbeSchema = z.object({
   platform: z.string(),
   arch: z.string(),
