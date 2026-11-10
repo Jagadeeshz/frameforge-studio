@@ -1,0 +1,57 @@
+name: Build Linux AppImage
+
+# Runs on every push to main. Manual dispatch is included so the workflow can be
+# exercised from the Actions tab without pushing a commit.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A second push to main cancels the run that is still building the older commit.
+concurrency:
+  group: linux-appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: AppImage (ubuntu, Node 20)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # No `cache: npm` here: the repo ships pnpm-lock.yaml only (there is no
+      # package-lock.json), and setup-node's npm cache requires that lockfile.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # electron-builder packages `build.files` (out/**/*, node_modules, package.json)
+      # and `main` points at ./out/main/index.js, so the Electron bundles must be
+      # built first — otherwise the AppImage is packaged without an entry point.
+      - name: Build Electron bundles (main, preload, renderer)
+        run: npx electron-vite build
+
+      - name: Build Linux AppImage
+        run: npx electron-builder --linux AppImage --publish never
+        env:
+          # No signing identity is available on the runner; skip the lookup.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # package.json sets build.directories.output = "release", so the AppImage
+      # lands in release/, not dist/.
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frameforge-linux-appimage
+          path: release/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
