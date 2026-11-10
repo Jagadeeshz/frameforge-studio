@@ -12,6 +12,14 @@ export interface CompositionOptions {
   height: number
   durationSeconds: number
   fps: number
+  /**
+   * `capture` (default) includes the pause/seek driver used by the frame
+   * grabber. `preview` ships the same card without any script, because a framed
+   * document inherits the app's strict CSP — an inline script there is blocked
+   * in production and would leave the frame blank. The settled look is carried
+   * by the `body.preview` rules instead.
+   */
+  mode?: 'preview' | 'capture'
 }
 
 const ASPECT_LABEL: Record<Aspect, string> = {
@@ -45,8 +53,10 @@ export function buildCompositionHtml(spec: JobSpec, options: CompositionOptions)
   const metaLeft = options.kind === 'intro' ? `${shotCount} SHOTS` : 'LOCAL RENDER'
   const metaRight = ASPECT_LABEL[spec.aspect]
   const brand = 'FRAMEFORGE STUDIO'
+  const mode = options.mode ?? 'capture'
+  const previewClass = mode === 'preview' ? 'preview' : ''
 
-  return `<!doctype html>
+  const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -165,9 +175,21 @@ export function buildCompositionHtml(spec: JobSpec, options: CompositionOptions)
 
   /* Everything is paused and driven by seek() for frame-accurate capture. */
   * { animation-play-state: paused !important; }
+
+  /* Static poster state for the embedded preview: the same card, settled at
+     roughly the point the capture driver parks it, with no JavaScript needed. */
+  body.preview * { animation: none !important; }
+  body.preview .glow { opacity: 0.92; transform: none; }
+  body.preview .grid { opacity: 1; }
+  body.preview .eyebrow,
+  body.preview .subhead,
+  body.preview h1,
+  body.preview .footer { opacity: 1; }
+  body.preview .bar { width: ${Math.round(340 * s)}px; }
+  body.preview .progress { width: 45%; }
 </style>
 </head>
-<body>
+<body class="${previewClass}">
   <div class="frame">
     <div class="glow"></div>
     <div class="grid"></div>
@@ -219,6 +241,10 @@ export function buildCompositionHtml(spec: JobSpec, options: CompositionOptions)
 </script>
 </body>
 </html>`
+
+  if (mode !== 'preview') return html
+  // No driver in the preview: CSS carries the settled state instead.
+  return html.replace(/\n?<script>[\s\S]*?<\/script>/, '')
 }
 
 export function compositionDurationSeconds(spec: JobSpec): { intro: number; outro: number } {

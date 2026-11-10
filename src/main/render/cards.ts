@@ -23,6 +23,9 @@ export async function renderCardsWithChromium(options: {
     show: false,
     width,
     height,
+    // Without this the window size includes chrome and the captured frame ends
+    // up shorter than the project frame; FFmpeg would then stretch it.
+    useContentSize: true,
     frame: false,
     backgroundColor: '#08080c',
     webPreferences: {
@@ -36,6 +39,14 @@ export async function renderCardsWithChromium(options: {
   win.webContents.setBackgroundThrottling(false)
 
   try {
+    const [contentWidth, contentHeight] = win.getContentSize()
+    if (contentWidth !== width || contentHeight !== height) {
+      win.setContentSize(width, height)
+      const [fixedWidth, fixedHeight] = win.getContentSize()
+      if (fixedWidth !== width || fixedHeight !== height) {
+        throw new Error(`Capture surface is ${fixedWidth}x${fixedHeight}, expected ${width}x${height}`)
+      }
+    }
     await win.loadURL(url)
     const ready = await waitFor(async () => {
       const value = await win.webContents.executeJavaScript('Boolean(window.__ff && window.__ff.ready)')
@@ -52,6 +63,16 @@ export async function renderCardsWithChromium(options: {
       )
       const image = await win.webContents.capturePage()
       if (image.isEmpty()) throw new Error(`Frame ${i} captured empty`)
+      // Guard the aspect ratio: a shorter surface would silently stretch the
+      // whole video once FFmpeg scales it to the project frame.
+      const size = image.getSize()
+      const expectedAspect = width / height
+      const actualAspect = size.width / size.height
+      if (Math.abs(actualAspect - expectedAspect) > 0.01) {
+        throw new Error(
+          `Frame ${i} is ${size.width}x${size.height} (aspect ${actualAspect.toFixed(3)}), expected ${expectedAspect.toFixed(3)}`
+        )
+      }
       const png = image.toPNG()
       if (png.byteLength < 512) throw new Error(`Frame ${i} captured suspiciously small (${png.byteLength}b)`)
       await fs.writeFile(join(framesDir, `frame_${String(i).padStart(5, '0')}.png`), png)

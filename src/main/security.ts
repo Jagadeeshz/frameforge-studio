@@ -38,6 +38,13 @@ export function cardCsp(): string {
 /** Applies the app CSP to every response in the default session. */
 export function applyCsp(target: Session, policy: string): void {
   target.webRequest.onHeadersReceived((details, callback) => {
+    // Composition documents carry their own policy from protocol.handle; if the
+    // app policy replaced it, their driver script would be blocked and every
+    // captured frame would come out blank.
+    if (details.url.startsWith('ffcomp://')) {
+      callback({ responseHeaders: details.responseHeaders })
+      return
+    }
     callback({
       responseHeaders: {
         ...details.responseHeaders,

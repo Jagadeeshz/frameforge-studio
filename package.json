@@ -21,16 +21,13 @@
     "dist": "pnpm build && electron-builder"
   },
   "dependencies": {
-    "@hyperframes/player": "0.9.30",
-    "@hyperframes/studio": "0.9.30",
     "@napi-rs/keyring": "2.1.2",
-    "lucide-react": "^0.545.0",
     "officecli": "0.2.121",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@hyperframes/player": "0.9.30",
+    "@hyperframes/studio": "0.9.30",
     "@tailwindcss/vite": "^4.1.11",
     "@types/node": "^22.10.5",
     "@types/react": "^19.1.0",
@@ -39,7 +36,10 @@
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "lucide-react": "^0.545.0",
     "pdfjs-dist": "^4.10.38",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
     "tailwindcss": "^4.1.11",
     "typescript": "^5.7.3",
     "vite": "^5.4.14",
@@ -59,15 +59,28 @@
     },
     "files": [
       "out/**/*",
+      "node_modules/**/*",
       "package.json"
     ],
     "asarUnpack": [
-      "**/node_modules/@napi-rs/keyring/**"
+      "**/node_modules/@napi-rs/keyring*/**",
+      "**/node_modules/officecli/**"
     ],
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false,
+      "artifactName": "FrameForge-Studio-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FrameForge Studio",
+      "artifactName": "FrameForge-Studio-${version}-Setup.${ext}"
     },
     "mac": {
       "target": [

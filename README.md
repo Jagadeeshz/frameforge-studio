@@ -92,6 +92,30 @@ The PDF is produced in two passes: the first lays the document out so each secti
 page number can be read back with pdf.js, the second prints the same layout with a
 populated table of contents. Only the Markdown is edited by hand.
 
+## Installing on Windows
+
+```
+pnpm dist      # writes release/FrameForge-Studio-<version>-Setup.exe
+```
+
+Run the installer; it installs per-user (no admin prompt) to
+`%LOCALAPPDATA%\Programs\frameforge-studio`, adds a Start-menu entry and a desktop
+shortcut, and registers an uninstaller under Settings → Apps. Launch it from either
+shortcut — the exe also works headlessly, which is how the smoke harness drives it:
+
+```
+"%LOCALAPPDATA%\Programs\frameforge-studio\FrameForge Studio.exe"
+```
+
+The packaged app resolves FFmpeg from `PATH`, keeps keys in the Windows Credential
+Manager, and runs OfficeCLI from `resources/app.asar.unpacked`.
+
+**Icon note.** `build.win.signAndEditExecutable` is `false`: unpacking electron-builder's
+winCodeSign payload needs `SeCreateSymbolicLinkPrivilege`, which a standard user does not
+have, so rcedit cannot stamp the exe. The shortcuts are retargeted to the brand icon by
+`scripts/set-shortcut-icon.ps1`; the exe itself keeps Electron's default icon. Enable
+Windows Developer Mode, drop that flag, and rebuild to embed it properly.
+
 ## Requirements
 
 - Node 22+ and pnpm 10+

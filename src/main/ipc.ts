@@ -133,7 +133,8 @@ export function registerIpc(context: IpcContext): void {
         width,
         height,
         durationSeconds: spec.aspect === '9:16' ? 2.6 : 3.2,
-        fps: 30
+        fps: 30,
+        mode: 'preview'
       })
       return { url: context.registerComposition(html) }
     } catch (error) {

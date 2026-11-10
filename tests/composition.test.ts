@@ -39,6 +39,36 @@ describe('composition html', () => {
     expect(size(portrait)).toBeLessThan(size(landscape))
   })
 
+  it('emits a script-free preview variant for the embedded frame', () => {
+    const preview = buildCompositionHtml(spec, {
+      kind: 'intro',
+      width: 1920,
+      height: 1080,
+      durationSeconds: 3.2,
+      fps: 30,
+      mode: 'preview'
+    })
+    // No inline script: the app CSP applies to framed documents and would block it.
+    expect(preview).not.toContain('<script')
+    expect(preview).not.toContain('window.__ff')
+    expect(preview).toContain('class="preview"')
+    // The settled state must be visible without any JavaScript.
+    expect(preview).toContain('body.preview h1')
+    expect(preview).toContain('body.preview * { animation: none !important; }')
+
+    const capture = buildCompositionHtml(spec, {
+      kind: 'intro',
+      width: 1920,
+      height: 1080,
+      durationSeconds: 3.2,
+      fps: 30,
+      mode: 'capture'
+    })
+    expect(capture).toContain('<script')
+    expect(capture).toContain('window.__ff')
+    expect(capture).not.toContain('class="preview"')
+  })
+
   it('labels the closing card differently from the opening card', () => {
     const intro = buildCompositionHtml(spec, { kind: 'intro', width: 1920, height: 1080, durationSeconds: 3, fps: 30 })
     const outro = buildCompositionHtml(spec, { kind: 'outro', width: 1920, height: 1080, durationSeconds: 3, fps: 30 })

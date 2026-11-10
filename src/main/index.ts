@@ -23,6 +23,15 @@ protocol.registerSchemesAsPrivileged([
 const isDev = !app.isPackaged
 const smokeMode = process.env.FRAMEFORGE_SMOKE === '1'
 
+/**
+ * UI libraries are bundled into the renderer, so they live in devDependencies.
+ * Read both blocks so the System screen can still report their versions.
+ */
+const PACKAGE_VERSIONS: Record<string, string | undefined> = {
+  ...pkg.dependencies,
+  ...pkg.devDependencies
+}
+
 /** Deterministic spec used by `FRAMEFORGE_SMOKE_JOB=1` end-to-end checks. */
 const SMOKE_JOB_SPEC = {
   title: 'Smoke Render',
@@ -144,8 +153,8 @@ async function bootstrap(): Promise<void> {
       authoring: office.available ? 'llm' : 'unknown'
     },
     hyperframes: {
-      playerVersion: pkg.dependencies['@hyperframes/player'] ?? null,
-      studioVersion: pkg.dependencies['@hyperframes/studio'] ?? null
+      playerVersion: PACKAGE_VERSIONS['@hyperframes/player'] ?? null,
+      studioVersion: PACKAGE_VERSIONS['@hyperframes/studio'] ?? null
     },
     dataDir,
     networkFree: true
