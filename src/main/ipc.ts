@@ -9,7 +9,9 @@ import {
   setKeySchema,
   testKeySchema,
   revealSchema,
-  PROVIDER_IDS,
+  llmSettingsSchema,
+  CUSTOM_LLM_ID,
+  VAULT_KEY_IDS,
   type Job,
   type ProviderDescriptor,
   type SystemProbe
@@ -17,6 +19,8 @@ import {
 import { buildCompositionHtml } from '../shared/composition'
 import type { KeyVault } from './vault'
 import type { ProviderRegistry } from './providers'
+import type { LlmClient } from './providers/llm'
+import type { SettingsStore } from './settings'
 import type { JobRunner } from './jobs/runner'
 import type { JobStore } from './jobs/store'
 import { dimensionsFor } from './ffmpeg'
@@ -26,6 +30,9 @@ export interface IpcContext {
   registry: ProviderRegistry
   runner: JobRunner
   store: JobStore
+  settings: SettingsStore
+  /** Resolves the user's OpenAI-compatible client, or null when unconfigured. */
+  getLlm: () => Promise<LlmClient | null>
   workspaceRoot: string
   probe: () => Promise<SystemProbe>
   registerComposition: (html: string) => string
@@ -37,13 +44,13 @@ function fail(error: unknown): never {
 }
 
 export function registerIpc(context: IpcContext): void {
-  const { vault, registry, runner, store } = context
+  const { vault, registry, runner, store, settings } = context
 
   ipcMain.handle(IPC.systemProbe, async () => context.probe())
 
   ipcMain.handle(IPC.vaultStatus, async () => {
     try {
-      return await vault.status(PROVIDER_IDS)
+      return await vault.status(VAULT_KEY_IDS)
     } catch (error) {
       fail(error)
     }
@@ -53,7 +60,7 @@ export function registerIpc(context: IpcContext): void {
     try {
       const input = setKeySchema.parse(raw)
       await vault.setSecret(input.providerId, input.key)
-      return await vault.status(PROVIDER_IDS)
+      return await vault.status(VAULT_KEY_IDS)
     } catch (error) {
       fail(error)
     }
@@ -63,7 +70,7 @@ export function registerIpc(context: IpcContext): void {
     try {
       const { providerId } = providerIdInputSchema.parse(raw)
       await vault.deleteSecret(providerId)
-      return await vault.status(PROVIDER_IDS)
+      return await vault.status(VAULT_KEY_IDS)
     } catch (error) {
       fail(error)
     }
@@ -72,6 +79,17 @@ export function registerIpc(context: IpcContext): void {
   ipcMain.handle(IPC.vaultTest, async (_event, raw: unknown) => {
     try {
       const input = testKeySchema.parse(raw)
+
+      // The universal provider has no fixed endpoint, so it is verified through
+      // the client built from the user's own base URL.
+      if (input.providerId === CUSTOM_LLM_ID) {
+        const client = await context.getLlm()
+        if (!client) return { ok: false, latencyMs: 0, message: 'Add a base URL and model first' }
+        const startedAt = Date.now()
+        const result = await client.verify()
+        return { ok: result.ok, latencyMs: Date.now() - startedAt, message: result.message }
+      }
+
       const key = await vault.getSecret(input.providerId)
       if (!key) return { ok: false, latencyMs: 0, message: 'No key stored for this provider' }
       const adapter = registry.get(input.providerId)
@@ -80,6 +98,30 @@ export function registerIpc(context: IpcContext): void {
       return { ok: result.ok, latencyMs: Date.now() - startedAt, message: result.message }
     } catch (error) {
       fail(error)
+    }
+  })
+
+  ipcMain.handle(IPC.llmSettingsGet, async () => settings.llm)
+
+  ipcMain.handle(IPC.llmSettingsSet, async (_event, raw: unknown) => {
+    try {
+      const next = llmSettingsSchema.parse(raw)
+      return await settings.setLlm(next)
+    } catch (error) {
+      fail(error)
+    }
+  })
+
+  ipcMain.handle(IPC.llmTest, async () => {
+    try {
+      const client = await context.getLlm()
+      if (!client) return { ok: false, latencyMs: 0, message: 'Add a base URL, model and key first' }
+      const startedAt = Date.now()
+      const result = await client.verify()
+      return { ok: result.ok, latencyMs: Date.now() - startedAt, message: result.message }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Connection failed'
+      return { ok: false, latencyMs: 0, message }
     }
   })
 

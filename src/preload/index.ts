@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, type FrameForgeBridge } from '../shared/bridge'
-import type { ConnectionResult, Job, JobSpec, ProviderDescriptor, ProviderId, SetKeyInput, SystemProbe, TestKeyInput, VaultStatus } from '../shared/contract'
+import type { ConnectionResult, Job, JobSpec, LlmSettings, ProviderDescriptor, ProviderId, SetKeyInput, SystemProbe, TestKeyInput, VaultStatus } from '../shared/contract'
 
 /**
  * The only surface the renderer gets. No node, no fs, no ipcRenderer — and no
@@ -42,6 +42,13 @@ const bridge: FrameForgeBridge = {
   composition: {
     preview: (spec: JobSpec): Promise<{ url: string }> =>
       ipcRenderer.invoke(IPC.compositionPreview, spec) as Promise<{ url: string }>
+  },
+
+  llm: {
+    settings: (): Promise<LlmSettings> => ipcRenderer.invoke(IPC.llmSettingsGet) as Promise<LlmSettings>,
+    saveSettings: (next: LlmSettings): Promise<LlmSettings> =>
+      ipcRenderer.invoke(IPC.llmSettingsSet, next) as Promise<LlmSettings>,
+    test: (): Promise<ConnectionResult> => ipcRenderer.invoke(IPC.llmTest) as Promise<ConnectionResult>
   },
 
   reveal: (path: string): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.reveal, { path }) as Promise<{ ok: boolean }>

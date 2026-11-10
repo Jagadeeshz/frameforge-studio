@@ -1,23 +1,28 @@
 import { useState, type ReactNode } from 'react'
 import { CheckCircle2, ExternalLink, KeyRound, ShieldCheck, Trash2, Zap } from 'lucide-react'
 import { Button, Input, Tooltip, HyperframesLoader } from '@hyperframes/studio/ui'
-import type { ConnectionResult, ProviderDescriptor, ProviderId, VaultStatus } from '../../../shared/contract'
+import type { ConnectionResult, LlmSettings, ProviderDescriptor, ProviderId, VaultStatus } from '../../../shared/contract'
 import { Pill, SectionLabel } from './Bits'
+import { CustomLlmCard } from './CustomLlmCard'
 
 export function KeysView({
   providers,
   vault,
+  llmSettings,
   onSave,
   onRemove,
   onTest,
-  onRefresh
+  onRefresh,
+  onLlmChanged
 }: {
   providers: ProviderDescriptor[]
   vault: VaultStatus | null
+  llmSettings: LlmSettings | null
   onSave: (providerId: ProviderId, key: string) => Promise<void>
   onRemove: (providerId: ProviderId) => Promise<void>
   onTest: (providerId: ProviderId) => Promise<ConnectionResult>
   onRefresh: () => Promise<void>
+  onLlmChanged: () => Promise<void>
 }): ReactNode {
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState<string | null>(null)
@@ -105,6 +110,12 @@ export function KeysView({
       ) : null}
 
       {error ? <div className="ff-err" style={{ marginBottom: 12 }}>{error}</div> : null}
+
+      <CustomLlmCard
+        settings={llmSettings}
+        keyStatus={vault?.providers.find((entry) => entry.providerId === 'custom') ?? null}
+        onSaved={onLlmChanged}
+      />
 
       {providers.length === 0 ? (
         <HyperframesLoader title="Reading providers" detail="Loading the local provider registry" />

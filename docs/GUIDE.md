@@ -34,7 +34,7 @@ Every job runs the same seven stages, in order. The Jobs screen shows each one l
 | # | Stage | What happens | Typical time |
 |---|-------|--------------|--------------|
 | 1 | Validate inputs & toolchain | Checks FFmpeg is installed and a key exists for the chosen provider | instant |
-| 2 | Storyboard via OfficeCLI | Optionally writes a `.docx` production brief from your shot list | 20–60 s |
+| 2 | Storyboard via OfficeCLI | Writes the production brief — Markdown from your own LLM when one is configured, otherwise a `.docx` from OfficeCLI | 5–60 s |
 | 3 | Generate shots with provider | Submits each shot, then polls until the provider returns a video | 1–10 min per shot |
 | 4 | Download source clips | Streams the returned clips into the job folder | seconds |
 | 5 | Compose title cards | Renders opening and closing cards, one PNG per frame | 10–20 s |
@@ -162,6 +162,31 @@ inspects your usage.
 
 Each provider card links to its documentation.
 
+### Universal LLM (DeepSeek, OpenRouter, Groq, Ollama…)
+
+The **Custom / Universal provider** card accepts any OpenAI-compatible chat endpoint, so the
+authoring side of the app is not limited to the six video providers. It takes four things:
+
+| Field | Example |
+|---|---|
+| Provider name | `DeepSeek` |
+| Base URL | `https://api.deepseek.com/v1` |
+| Model ID | `deepseek-chat` |
+| API key | your key for that service |
+
+Presets fill the first three for DeepSeek, OpenRouter, Groq and a local Ollama, and any other
+endpoint that speaks `POST /v1/chat/completions` works the same way.
+
+This provider does **not** generate video — it writes the storyboard brief and can rewrite your
+shot prompts before they are sent to the video provider. It is stored exactly like the others:
+name, base URL and model go to `settings.json`, the key goes to the OS credential store under
+`provider:custom`, and **Test** performs one authenticated `GET /models` so a wrong key is caught
+without spending tokens.
+
+The app builds the HTTP client for this provider from your base URL alone: that single host is
+allowlisted for that client, so no other address becomes reachable. Loopback addresses are
+permitted only because you typed them (useful for Ollama or LM Studio on your own machine).
+
 ### How keys are stored
 
 - The key is written to the operating system's credential store: **Windows Credential
@@ -203,8 +228,13 @@ starts a generation, so testing costs nothing.
 7. **Shots** — one prompt per shot, up to six. See §8.
 8. **Title cards** — headline (80 characters), subhead (120), accent colour. Switch
    *Show titles* off to render without cards.
-9. **Office deliverables** — enable the storyboard brief and/or the delivery deck.
-10. Review the preview, then **Render locally**.
+9. **Office deliverables** — enable the storyboard brief and/or the delivery deck. With a
+   universal LLM configured, the brief is Markdown written by your model; without one it falls
+   back to OfficeCLI.
+10. **Authoring model** — the *Rewrite each shot prompt* switch asks your LLM to turn every shot
+    into a camera + subject + light + grade sentence before generation. The before/after pairs are
+    saved as `enhanced-prompts.json` next to the job.
+11. Review the preview, then **Render locally**.
 
 If the button is disabled, the reason is stated directly beneath it: no FFmpeg, no key
 for the chosen provider, or an empty shot prompt.
@@ -306,7 +336,7 @@ Four commands, in increasing scope:
 
 ```
 pnpm typecheck      # strict TypeScript, no `any`
-pnpm test           # 41 tests: vault, providers, FFmpeg, pipeline, jobs, documents
+pnpm test           # 55 tests: vault, providers, LLM, FFmpeg, pipeline, jobs, documents
 pnpm smoke          # boots the real app, checks the bridge and vault, writes smoke.png
 pnpm smoke:job      # full render through the UI against a local mock provider
 ```
@@ -358,6 +388,9 @@ api.dev.runwayml.com · api.lumalabs.ai · queue.fal.run
 api.replicate.com · api.heygen.com · api.openai.com
 ```
 
+A custom LLM adds exactly one more host: the one in your base URL, and only for the client built
+for that provider — it is not merged into the app-wide allowlist.
+
 Media downloads must be HTTPS and may not resolve to loopback, RFC1918, link-local,
 `.local` or `.internal` addresses, because providers return signed CDN URLs that cannot
 be pre-allowlisted.
@@ -403,6 +436,7 @@ in your release pipeline.
 | `FRAMEFORGE_SMOKE_OUT` | Where the self-check writes its screenshot |
 | `FRAMEFORGE_SMOKE_TAB` | Section to open before capturing (`keys`, `jobs`, `system`) |
 | `FRAMEFORGE_SMOKE_JOB` | Run a full job through the UI during the self-check |
+| `FRAMEFORGE_SMOKE_LLM_URL` | Point the self-check at an OpenAI-compatible mock, so the storyboard and prompt-enhancement paths are exercised too |
 
 `FRAMEFORGE_DEV_*` exist so the desktop app can be pointed at a mock or a self-hosted
 gateway during testing. Leave them unset in normal use — they also relax the loopback

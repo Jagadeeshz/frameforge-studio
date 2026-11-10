@@ -18,5 +18,6 @@ export const DEFAULT_TEST_SPEC: JobSpec = {
     accent: '#7C5CFF'
   },
   office: { storyboard: false, deliveryDeck: false },
+  enhancePrompts: false,
   outputName: 'test-reel'
 }

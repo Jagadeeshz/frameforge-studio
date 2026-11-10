@@ -36,6 +36,7 @@ export const DEFAULT_SPEC: JobSpec = {
     accent: '#7C5CFF'
   },
   office: { storyboard: true, deliveryDeck: false },
+  enhancePrompts: false,
   outputName: 'q4-teaser'
 }
 

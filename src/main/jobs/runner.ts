@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { Artifact, Job, JobSpec, ProviderId, StageId } from '../../shared/contract'
 import { buildCompositionHtml, compositionDurationSeconds } from '../../shared/composition'
 import type { ProviderAdapter } from '../providers/types'
+import { buildEnhanceRequest, buildStoryboardRequest, cleanEnhancement, type LlmClient } from '../providers/llm'
 import type { HttpClient } from '../providers/http'
 import type { Ffmpeg, MediaInfo } from '../ffmpeg'
 import { dimensionsFor } from '../ffmpeg'
@@ -54,6 +55,8 @@ export interface RunnerDeps {
   http: HttpClient
   ffmpeg: Ffmpeg
   office: { info: OfficeCliInfo }
+  /** User's OpenAI-compatible client, or null when none is configured. */
+  getLlm?: () => Promise<LlmClient | null>
   workspaceRoot: string
   /** Injected so the pipeline stays free of Electron imports (and testable). */
   renderCards(options: {
@@ -161,8 +164,28 @@ export class JobRunner {
 
       await this.#stage(current, 'storyboard', controller, async () => {
         if (!job.spec.office.storyboard) return 'Skipped (not requested)'
+
+        // Prefer the user's own model: any OpenAI-compatible endpoint, billed to
+        // their key, so the brief does not depend on OfficeCLI's hosted credits.
+        const llm = this.#deps.getLlm ? await this.#deps.getLlm() : null
+        if (llm) {
+          const request = buildStoryboardRequest(job.spec)
+          const brief = await llm.complete({ system: request.system, prompt: request.prompt, maxTokens: 1500 })
+          const path = join(dirs.docs, 'storyboard.md')
+          await fs.writeFile(path, `# ${job.spec.title}\n\n${brief}\n`, 'utf8')
+          const stat = await fs.stat(path)
+          current.artifacts.push({
+            kind: 'storyboard',
+            label: `Brief · ${llm.config.name} (${llm.config.model})`,
+            path,
+            bytes: stat.size,
+            createdAt: new Date().toISOString()
+          })
+          return `Brief written with ${llm.config.model}`
+        }
+
         const info = this.#deps.office.info
-        if (!info.available || !info.path) return 'Skipped (OfficeCLI not installed)'
+        if (!info.available || !info.path) return 'Skipped (no LLM configured and OfficeCLI is not installed)'
         const doc = await generateOfficeDocument({
           binary: info.path,
           kind: 'docx',
@@ -190,11 +213,27 @@ export class JobRunner {
       downloadStage.startedAt = new Date().toISOString()
       await emit()
 
+      // Prompt enhancement runs per shot, before submission, only when the user
+      // enabled it and an LLM is configured.
+      const enhancer = job.spec.enhancePrompts && this.#deps.getLlm ? await this.#deps.getLlm() : null
+      const enhancedPrompts: Array<{ index: number; original: string; used: string }> = []
+
       for (const shot of job.spec.shots) {
         this.#throwIfAborted(controller)
+
+        let prompt = shot.prompt
+        if (enhancer) {
+          const request = buildEnhanceRequest(shot, job.spec)
+          const rewritten = await enhancer.complete({ system: request.system, prompt: request.prompt, maxTokens: 320 })
+          prompt = cleanEnhancement(rewritten, shot.prompt)
+          enhancedPrompts.push({ index: shot.index, original: shot.prompt, used: prompt })
+          generateStage.detail = `Shot ${shot.index + 1}/${job.spec.shots.length} · prompt enhanced by ${enhancer.config.model}`
+          await emit()
+        }
+
         const remote = await adapter.submit(
           {
-            prompt: shot.prompt,
+            prompt,
             durationSeconds: job.spec.durationSeconds,
             aspect: job.spec.aspect,
             model: job.spec.model
@@ -233,6 +272,19 @@ export class JobRunner {
         current.progress = Math.round(GAP_AFTER.validate + (GAP_AFTER.generate - GAP_AFTER.validate) * ((shot.index + 1) / job.spec.shots.length))
         await emit()
       }
+      if (enhancedPrompts.length > 0) {
+        const promptsPath = join(dirs.docs, 'enhanced-prompts.json')
+        await fs.mkdir(dirs.docs, { recursive: true })
+        await fs.writeFile(promptsPath, JSON.stringify(enhancedPrompts, null, 2), 'utf8')
+        current.artifacts.push({
+          kind: 'log',
+          label: 'Enhanced prompts (before → after)',
+          path: promptsPath,
+          bytes: (await fs.stat(promptsPath)).size,
+          createdAt: new Date().toISOString()
+        })
+      }
+
       generateStage.status = 'succeeded'
       generateStage.endedAt = new Date().toISOString()
       downloadStage.status = 'succeeded'

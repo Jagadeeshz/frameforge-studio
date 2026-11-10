@@ -12,12 +12,14 @@ import { Ffmpeg } from '../src/main/ffmpeg'
 import { locateFfmpeg } from '../src/main/ffmpeg/locate'
 import { DEFAULT_TEST_SPEC } from './helpers'
 import type { Job } from '../src/shared/contract'
+import type { LlmClient } from '../src/main/providers/llm'
 
 const run = promisify(execFile)
 let server: Server
 let base = ''
 let media: Buffer
 let dir = ''
+let lastSubmittedPrompt = ''
 
 beforeAll(async () => {
   dir = await fs.mkdtemp(join(process.env.TMPDIR ?? tmpdir(), 'ff-pipe-'))
@@ -48,6 +50,11 @@ beforeAll(async () => {
     req.on('end', () => {
       const hold = body.includes('never')
       if (req.method === 'POST' && url.pathname === '/v1/text_to_video') {
+        try {
+          lastSubmittedPrompt = (JSON.parse(body) as { promptText?: string }).promptText ?? ''
+        } catch {
+          lastSubmittedPrompt = ''
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ id: hold ? 'task-hold' : 'task-fast' }))
         return
@@ -82,7 +89,10 @@ afterAll(async () => {
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-async function buildRunner(workspace: string): Promise<{ runner: JobRunner; store: JobStore }> {
+async function buildRunner(
+  workspace: string,
+  getLlm?: () => Promise<LlmClient | null>
+): Promise<{ runner: JobRunner; store: JobStore }> {
   const tools = await locateFfmpeg()
   const registry = createProviderRegistry({ baseUrls: { runway: base }, allowLoopback: true })
   const store = new JobStore(join(workspace, 'jobs'))
@@ -95,6 +105,7 @@ async function buildRunner(workspace: string): Promise<{ runner: JobRunner; stor
     http: registry.http,
     ffmpeg: new Ffmpeg(tools),
     office: { info: { available: false, path: null, version: null, mode: 'unknown' } },
+    ...(getLlm ? { getLlm } : {}),
     workspaceRoot: workspace,
     pollIntervalMs: 120,
     pollTimeoutMs: 20_000,
@@ -160,6 +171,52 @@ describe('job pipeline', () => {
 
     expect(finished.artifacts.filter((artifact) => artifact.kind === 'clip')).toHaveLength(2)
     expect(finished.costEstimateUsd).toBeGreaterThan(0)
+  })
+
+  it('writes the storyboard with the user\'s LLM and enhances every shot prompt', async () => {
+    const workspace = join(dir, 'run-llm')
+    const calls: string[] = []
+    const fakeLlm: LlmClient = {
+      config: { name: 'Mock LLM', baseUrl: 'http://127.0.0.1:1/v1', model: 'mock-model' },
+      async verify() {
+        return { ok: true, message: 'ok' }
+      },
+      async complete(input: { system?: string; prompt: string }) {
+        calls.push(input.prompt)
+        if (input.prompt.includes('production brief')) return '## Objective\nShip the teaser.'
+        const original = input.prompt.split('Original: ')[1] ?? 'unknown'
+        return `ENHANCED SHOT: ${original}`
+      }
+    }
+
+    const { runner, store } = await buildRunner(workspace, async () => fakeLlm)
+    const queued = await runner.enqueue({
+      ...DEFAULT_TEST_SPEC,
+      office: { storyboard: true, deliveryDeck: false },
+      enhancePrompts: true
+    })
+    const finished = await waitForFinish(store, queued.id)
+
+    expect(finished.status, finished.error ?? '').toBe('succeeded')
+
+    const storyboardStage = finished.stages.find((stage) => stage.id === 'storyboard')
+    expect(storyboardStage?.status).toBe('succeeded')
+    expect(storyboardStage?.detail).toContain('mock-model')
+
+    const storyboard = finished.artifacts.find((artifact) => artifact.kind === 'storyboard')
+    expect(storyboard?.path.endsWith('storyboard.md')).toBe(true)
+    const brief = await fs.readFile(storyboard!.path, 'utf8')
+    expect(brief).toContain('## Objective')
+
+    const prompts = finished.artifacts.find((artifact) => artifact.kind === 'log')
+    expect(prompts?.path.endsWith('enhanced-prompts.json')).toBe(true)
+    const rewritten = JSON.parse(await fs.readFile(prompts!.path, 'utf8')) as Array<{ original: string; used: string }>
+    expect(rewritten).toHaveLength(DEFAULT_TEST_SPEC.shots.length)
+    expect(rewritten.every((entry) => entry.used.startsWith('ENHANCED SHOT:'))).toBe(true)
+
+    // The provider must have received the rewritten prompt, not the original.
+    expect(lastSubmittedPrompt.startsWith('ENHANCED SHOT:')).toBe(true)
+    expect(calls.length).toBe(DEFAULT_TEST_SPEC.shots.length + 1)
   })
 
   it('cancels a job stuck waiting on the provider', async () => {

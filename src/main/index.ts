@@ -1,11 +1,13 @@
 import { app, BrowserWindow, protocol, session, safeStorage } from 'electron'
 import { join } from 'node:path'
 import pkg from '../../package.json'
-import { IPC, PROVIDER_IDS, type ProviderId, type SystemProbe } from '../shared/contract'
+import { IPC, PROVIDER_IDS, CUSTOM_LLM_ID, type ProviderId, type SystemProbe } from '../shared/contract'
 import { KeyVault, createKeyringBackend, createSafeStorageBackend, createMemoryBackend, metaPathFor } from './vault'
 import { locateFfmpeg, type ToolInfo } from './ffmpeg/locate'
 import { Ffmpeg } from './ffmpeg'
 import { createProviderRegistry } from './providers'
+import { createLlmClient, type LlmClient } from './providers/llm'
+import { SettingsStore } from './settings'
 import { JobRunner } from './jobs/runner'
 import { JobStore } from './jobs/store'
 import { locateOfficeCli } from './office'
@@ -118,6 +120,22 @@ async function bootstrap(): Promise<void> {
   await store.init()
   await store.reconcile()
 
+  // --- universal OpenAI-compatible LLM (user's own endpoint + key) ---------
+  const settingsStore = new SettingsStore(dataDir)
+  await settingsStore.init()
+
+  const getLlm = async (): Promise<LlmClient | null> => {
+    const config = settingsStore.llm.custom
+    if (!config) return null
+    const key = await vault.getSecret(CUSTOM_LLM_ID)
+    if (!key) return null
+    try {
+      return createLlmClient(config, key)
+    } catch {
+      return null
+    }
+  }
+
   const runner = new JobRunner({
     store,
     getKey: (providerId) => vault.getSecret(providerId),
@@ -125,6 +143,7 @@ async function bootstrap(): Promise<void> {
     http: registry.http,
     ffmpeg,
     office: { info: office },
+    getLlm,
     workspaceRoot: paths.root,
     renderCards: async (options) => {
       const url = compositions.register(options.html)
@@ -176,7 +195,7 @@ async function bootstrap(): Promise<void> {
   })
 
   applyCsp(sessionDefault(), contentSecurityPolicy())
-  registerIpc({ vault, registry, runner, store, workspaceRoot: paths.root, probe, registerComposition: (html) => compositions.register(html) })
+  registerIpc({ vault, registry, runner, store, settings: settingsStore, getLlm, workspaceRoot: paths.root, probe, registerComposition: (html) => compositions.register(html) })
 
   mainWindow = createWindow()
   app.on('activate', () => {
@@ -264,12 +283,39 @@ function runSmoke(
           await new Promise((r) => setTimeout(r, 700))
         }
 
+        // Optional: point the universal LLM at a mock endpoint so the packaged
+        // app exercises the storyboard and prompt-enhancement paths too.
+        const llmUrl = process.env.FRAMEFORGE_SMOKE_LLM_URL
+        let llmCheck: unknown = null
+        if (llmUrl) {
+          llmCheck = await win.webContents.executeJavaScript(`(async () => {
+            const bridge = window.frameforge
+            await bridge.llm.saveSettings({ custom: { name: 'Smoke LLM', baseUrl: ${JSON.stringify(llmUrl)}, model: 'smoke-model' } })
+            await bridge.vault.set({ providerId: 'custom', key: 'sk-smoke-llm-key-123456789' })
+            const settings = await bridge.llm.settings()
+            const status = await bridge.vault.status()
+            const entry = status.providers.find((p) => p.providerId === 'custom')
+            const test = await bridge.llm.test()
+            return {
+              model: settings.custom ? settings.custom.model : null,
+              keyConfigured: entry ? entry.configured : false,
+              last4: entry ? entry.last4 : null,
+              test
+            }
+          })()`)
+        }
+
         let jobResult: unknown = null
         if (process.env.FRAMEFORGE_SMOKE_JOB === '1') {
+          const spec = {
+            ...SMOKE_JOB_SPEC,
+            office: { ...SMOKE_JOB_SPEC.office, storyboard: Boolean(llmUrl) },
+            enhancePrompts: Boolean(llmUrl)
+          }
           jobResult = await win.webContents.executeJavaScript(`(async () => {
             const bridge = window.frameforge
             await bridge.vault.set({ providerId: 'runway', key: 'smoke-run-key-123456789' })
-            const created = await bridge.jobs.create(${JSON.stringify(SMOKE_JOB_SPEC)})
+            const created = await bridge.jobs.create(${JSON.stringify(spec)})
             let job = created
             for (let i = 0; i < 300; i += 1) {
               job = await bridge.jobs.get(created.id)
@@ -328,6 +374,7 @@ function runSmoke(
             bridgeReady,
             frameState,
             vaultCheck,
+            llmCheck,
             jobResult,
             ffmpeg: probe.ffmpeg.available,
             officecli: probe.officecli.available,

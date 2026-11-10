@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Plus, Trash2, Play, Sparkles, FileText, Presentation } from 'lucide-react'
 import { Button, IconButton, Input, Select, Toggle, Tooltip } from '@hyperframes/studio/ui'
 import type { JobSpec, ProviderDescriptor, ProviderId } from '../../../shared/contract'
-import { Field, SectionLabel } from './Bits'
+import { Field, Pill, SectionLabel } from './Bits'
 
 const COST_PER_SECOND: Record<ProviderId, number> = {
   runway: 0.1,
@@ -24,6 +24,7 @@ export function StudioView({
   onRender,
   ffmpegReady,
   officeReady,
+  llmLabel,
   onOpenKeys
 }: {
   spec: JobSpec
@@ -35,6 +36,7 @@ export function StudioView({
   onRender: () => void
   ffmpegReady: boolean
   officeReady: boolean
+  llmLabel: string | null
   onOpenKeys: () => void
 }): ReactNode {
   const active = providers.find((provider) => provider.id === spec.providerId)
@@ -259,6 +261,24 @@ export function StudioView({
           </div>
         </div>
         {!officeReady ? <div className="ff-hint" style={{ marginTop: 10 }}>OfficeCLI not detected — document stages will be skipped.</div> : null}
+      </div>
+
+      <div className="ff-card">
+        <SectionLabel right={llmLabel ? <Pill label="connected" state="ok" /> : undefined}>Authoring model</SectionLabel>
+        <div className="flex items-center justify-between" style={{ gap: 12 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12.5 }}>Rewrite each shot prompt before generation</div>
+            <div className="ff-hint" style={{ marginTop: 4 }}>
+              {llmLabel ? `Uses ${llmLabel}` : 'Add a custom / universal provider under Keys to enable this.'}
+            </div>
+          </div>
+          <Toggle
+            label="Enhance prompts"
+            checked={spec.enhancePrompts}
+            onCommit={(next) => patch({ enhancePrompts: next })}
+            disabled={!llmLabel}
+          />
+        </div>
       </div>
       </div>
 

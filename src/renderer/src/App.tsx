@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Clapperboard, KeyRound, ListChecks, MonitorCog, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { Tabs, TabsList, Tab } from '@hyperframes/studio/ui'
-import type { Job, JobSpec, ProviderDescriptor, SystemProbe, VaultStatus } from '../../shared/contract'
+import type { Job, JobSpec, LlmSettings, ProviderDescriptor, SystemProbe, VaultStatus } from '../../shared/contract'
 import { api, DEFAULT_SPEC, upsertJob } from './lib/api'
 import { Pill } from './components/Bits'
 import { StudioView } from './components/StudioView'
@@ -20,6 +20,7 @@ export function App(): ReactNode {
   const [tab, setTab] = useState<TabId>('studio')
   const [probe, setProbe] = useState<SystemProbe | null>(null)
   const [vault, setVault] = useState<VaultStatus | null>(null)
+  const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null)
   const [providers, setProviders] = useState<ProviderDescriptor[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
   const [spec, setSpec] = useState<JobSpec>(DEFAULT_SPEC)
@@ -34,17 +35,19 @@ export function App(): ReactNode {
     const boot = async (): Promise<void> => {
       try {
         const bridge = api()
-        const [probeResult, vaultResult, providerResult, jobResult] = await Promise.all([
+        const [probeResult, vaultResult, providerResult, jobResult, llmResult] = await Promise.all([
           bridge.systemProbe(),
           bridge.vault.status(),
           bridge.providers.list(),
-          bridge.jobs.list()
+          bridge.jobs.list(),
+          bridge.llm.settings()
         ])
         if (cancelled) return
         setProbe(probeResult)
         setVault(vaultResult)
         setProviders(providerResult)
         setJobs(jobResult)
+        setLlmSettings(llmResult)
         if (jobResult[0]) setSelectedJobId(jobResult[0].id)
       } catch (error) {
         if (!cancelled) setBootError(error instanceof Error ? error.message : 'Bridge failed to start')
@@ -116,6 +119,13 @@ export function App(): ReactNode {
 
   const handleVaultRefresh = useCallback(async (): Promise<void> => {
     setVault(await api().vault.status())
+  }, [])
+
+  /** The custom provider touches both stores, so refresh them together. */
+  const handleLlmChanged = useCallback(async (): Promise<void> => {
+    const [status, settings] = await Promise.all([api().vault.status(), api().llm.settings()])
+    setVault(status)
+    setLlmSettings(settings)
   }, [])
 
   if (bootError) {
@@ -202,6 +212,7 @@ export function App(): ReactNode {
               onRender={() => void handleRender()}
               ffmpegReady={probe?.ffmpeg.available ?? false}
               officeReady={probe?.officecli.available ?? false}
+              llmLabel={llmSettings?.custom ? `${llmSettings.custom.name} · ${llmSettings.custom.model}` : null}
               onOpenKeys={() => setTab('keys')}
             />
             <section className="ff-pane">
@@ -233,10 +244,12 @@ export function App(): ReactNode {
           <KeysView
             providers={providers}
             vault={vault}
+            llmSettings={llmSettings}
             onSave={handleKeySave}
             onRemove={handleKeyRemove}
             onTest={async (providerId) => api().vault.test({ providerId })}
             onRefresh={handleVaultRefresh}
+            onLlmChanged={handleLlmChanged}
           />
         ) : null}
 

@@ -24,6 +24,7 @@ title cards (HyperFrames) ─────────┘                        
 | **FFmpeg local rendering** | Probe, normalise, xfade/concat, PNG-sequence encode, poster extraction — all via direct spawn (never a shell) | `src/main/ffmpeg/*` |
 | **OS-native key vault** | `@napi-rs/keyring` → Windows Credential Manager / macOS Keychain / libsecret, falling back to Electron `safeStorage` (DPAPI/Keychain) | `src/main/vault.ts` |
 | **No backend server** | All provider calls originate in the main process with the user's key; hosts are allowlisted and media URLs are SSRF-guarded | `src/main/providers/*` |
+| **Any OpenAI-compatible LLM** | A universal provider (DeepSeek, OpenRouter, Groq, Ollama…) writes the storyboard and rewrites shot prompts; its base URL is allowlisted per client, never app-wide | `src/main/providers/llm.ts`, `src/main/settings.ts` |
 
 ## Architecture
 
@@ -35,8 +36,8 @@ src/
     ipc.ts            zod-validated IPC handlers
     vault.ts          OS credential store + safeStorage fallback, metadata only on disk
     fsx.ts            atomic JSON writes (Windows rename-retry)
-    providers/        runway · luma · fal · replicate · heygen · openai
-    ffmpeg/           binary discovery, probe, normalise, concat, frame encode
+    providers/        runway · luma · fal · replicate · heygen · openai · universal LLM
+    settings.ts       non-secret config (custom provider name/url/model)
     office/           OfficeCLI discovery + document generation
     render/cards.ts   offscreen Chromium capture, one PNG per frame
     jobs/             durable job store + staged runner
@@ -138,7 +139,7 @@ watch stages in **Jobs**. Output lands in
 
 ```bash
 pnpm typecheck      # strict TS, zero any
-pnpm test           # 41 tests: vault, providers, ffmpeg, pipeline, office, composition
+pnpm test           # 55 tests: vault, providers, LLM, ffmpeg, pipeline, office, composition
 pnpm build          # typecheck + electron-vite production build
 pnpm smoke          # boots the app, checks bridge + vault round-trip, writes smoke.png
 pnpm smoke:job      # full render through the real UI against a local mock provider

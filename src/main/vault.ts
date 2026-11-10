@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import type { KeyStatus, ProviderId, VaultBackendName, VaultStatus } from '../shared/contract'
+import type { KeyStatus, VaultBackendName, VaultKeyId, VaultStatus } from '../shared/contract'
 import { writeJsonAtomic } from './fsx'
 
 /**
@@ -39,7 +39,7 @@ interface MetaFile {
 
 const EMPTY_META: MetaFile = { version: 1, keys: {} }
 
-export function accountFor(providerId: ProviderId): string {
+export function accountFor(providerId: VaultKeyId): string {
   return `provider:${providerId}`
 }
 
@@ -104,7 +104,7 @@ export class KeyVault {
     this.#loaded = true
   }
 
-  async status(providerIds: readonly ProviderId[]): Promise<VaultStatus> {
+  async status(providerIds: readonly VaultKeyId[]): Promise<VaultStatus> {
     if (!this.#loaded) await this.init()
     const providers: KeyStatus[] = []
     for (const providerId of providerIds) {
@@ -126,7 +126,7 @@ export class KeyVault {
   }
 
   /** Main-process only. Never exposed over IPC. */
-  async getSecret(providerId: ProviderId): Promise<string | null> {
+  async getSecret(providerId: VaultKeyId): Promise<string | null> {
     if (!this.#loaded) await this.init()
     if (!this.#meta.keys[providerId]) return null
     try {
@@ -138,7 +138,7 @@ export class KeyVault {
     }
   }
 
-  async setSecret(providerId: ProviderId, raw: string): Promise<KeyStatus> {
+  async setSecret(providerId: VaultKeyId, raw: string): Promise<KeyStatus> {
     if (!this.#loaded) await this.init()
     const validated = validateKeyMaterial(raw)
     if (!validated.ok) throw new VaultError(validated.reason)
@@ -154,7 +154,7 @@ export class KeyVault {
     return { providerId, configured: true, last4: meta.last4, fingerprint: meta.fingerprint.slice(0, 6), updatedAt: meta.updatedAt }
   }
 
-  async deleteSecret(providerId: ProviderId): Promise<void> {
+  async deleteSecret(providerId: VaultKeyId): Promise<void> {
     if (!this.#loaded) await this.init()
     try {
       await this.#backend.delete(accountFor(providerId))

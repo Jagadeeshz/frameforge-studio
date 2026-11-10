@@ -2,11 +2,12 @@ import type {
   ConnectionResult,
   Job,
   JobSpec,
+  LlmSettings,
   ProviderDescriptor,
-  ProviderId,
   SetKeyInput,
   SystemProbe,
   TestKeyInput,
+  VaultKeyId,
   VaultStatus
 } from './contract'
 
@@ -33,6 +34,9 @@ export const IPC = {
   jobDelete: 'job:delete',
   jobEvent: 'job:event',
   compositionPreview: 'composition:preview',
+  llmSettingsGet: 'llm:settings:get',
+  llmSettingsSet: 'llm:settings:set',
+  llmTest: 'llm:test',
   reveal: 'shell:reveal'
 } as const
 
@@ -44,7 +48,7 @@ export interface FrameForgeBridge {
   vault: {
     status(): Promise<VaultStatus>
     set(input: SetKeyInput): Promise<VaultStatus>
-    remove(providerId: ProviderId): Promise<VaultStatus>
+    remove(providerId: VaultKeyId): Promise<VaultStatus>
     test(input: TestKeyInput): Promise<ConnectionResult>
   }
   providers: {
@@ -60,6 +64,12 @@ export interface FrameForgeBridge {
   }
   composition: {
     preview(spec: JobSpec): Promise<{ url: string }>
+  }
+  /** Universal OpenAI-compatible LLM: storyboards and prompt enhancement. */
+  llm: {
+    settings(): Promise<LlmSettings>
+    saveSettings(next: LlmSettings): Promise<LlmSettings>
+    test(): Promise<ConnectionResult>
   }
   reveal(path: string): Promise<{ ok: boolean }>
 }

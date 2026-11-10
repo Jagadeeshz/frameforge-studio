@@ -18,6 +18,17 @@ export const PROVIDER_IDS = [
 export const providerIdSchema = z.enum(PROVIDER_IDS)
 export type ProviderId = z.infer<typeof providerIdSchema>
 
+/**
+ * The universal OpenAI-compatible LLM is a vault key and a settings entry, not
+ * a video provider: it never joins PROVIDER_IDS, so it can never be selected as
+ * a render source, only as the authoring model behind storyboards and prompt
+ * enhancement.
+ */
+export const CUSTOM_LLM_ID = 'custom' as const
+export const vaultKeyIdSchema = z.union([providerIdSchema, z.literal(CUSTOM_LLM_ID)])
+export type VaultKeyId = z.infer<typeof vaultKeyIdSchema>
+export const VAULT_KEY_IDS: readonly VaultKeyId[] = [...PROVIDER_IDS, CUSTOM_LLM_ID]
+
 export const aspectSchema = z.enum(['16:9', '9:16', '1:1'])
 export type Aspect = z.infer<typeof aspectSchema>
 
@@ -41,7 +52,7 @@ export const vaultBackendSchema = z.enum(['keyring', 'safeStorage', 'memory', 'u
 export type VaultBackendName = z.infer<typeof vaultBackendSchema>
 
 export const keyStatusSchema = z.object({
-  providerId: providerIdSchema,
+  providerId: vaultKeyIdSchema,
   configured: z.boolean(),
   last4: z.string().nullable(),
   fingerprint: z.string().nullable(),
@@ -58,17 +69,49 @@ export const vaultStatusSchema = z.object({
 export type VaultStatus = z.infer<typeof vaultStatusSchema>
 
 export const setKeySchema = z.object({
-  providerId: providerIdSchema,
+  providerId: vaultKeyIdSchema,
   key: z.string().min(8).max(4096)
 })
 export type SetKeyInput = z.infer<typeof setKeySchema>
 
 export const testKeySchema = z.object({
-  providerId: providerIdSchema
+  providerId: vaultKeyIdSchema
 })
 export type TestKeyInput = z.infer<typeof testKeySchema>
 
-export const providerIdInputSchema = z.object({ providerId: providerIdSchema })
+export const providerIdInputSchema = z.object({ providerId: vaultKeyIdSchema })
+
+/* ------------------------------------------------------------------ */
+/* Universal OpenAI-compatible LLM (DeepSeek, OpenRouter, Groq, Ollama…) */
+/* ------------------------------------------------------------------ */
+
+export const llmBaseUrlSchema = z
+  .string()
+  .trim()
+  .min(8)
+  .max(300)
+  .refine((value) => /^https?:\/\/[^\s]+$/i.test(value), 'Base URL must start with https:// (or http:// for a local model)')
+  .transform((value) => value.replace(/\/+$/, ''))
+
+export const customLlmConfigSchema = z.object({
+  name: z.string().trim().min(1, 'Name your provider').max(40),
+  baseUrl: llmBaseUrlSchema,
+  model: z.string().trim().min(1, 'Model id is required').max(120)
+})
+export type CustomLlmConfig = z.infer<typeof customLlmConfigSchema>
+
+export const llmSettingsSchema = z.object({
+  custom: customLlmConfigSchema.nullable()
+})
+export type LlmSettings = z.infer<typeof llmSettingsSchema>
+
+export const emptyLlmSettings: LlmSettings = { custom: null }
+
+export const llmCompleteInputSchema = z.object({
+  system: z.string().max(4000).optional(),
+  prompt: z.string().min(1).max(8000),
+  maxTokens: z.number().int().min(64).max(4000).optional()
+})
 
 export const connectionResultSchema = z.object({
   ok: z.boolean(),
@@ -104,6 +147,8 @@ export const jobSpecSchema = z.object({
     storyboard: z.boolean(),
     deliveryDeck: z.boolean()
   }),
+  /** Rewrite each shot prompt with the configured LLM before generation. */
+  enhancePrompts: z.boolean().default(false),
   outputName: z
     .string()
     .min(1)
